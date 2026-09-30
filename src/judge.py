@@ -10,9 +10,20 @@ for).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+from typing import Callable
+
 from pydantic import BaseModel, Field
 
 from src.agents import Verdict, VerifiedFact
+from src.tools.page import (
+    PageResult,
+    claim_keywords,
+    fetch_page,
+    parse_iso_date,
+    window_around_keywords,
+)
 
 _JUDGED = (Verdict.TRUE, Verdict.FALSE, Verdict.MISLEADING)
 _ACCUSATIONS = (Verdict.FALSE, Verdict.MISLEADING)
@@ -137,3 +148,118 @@ def apply_judge_downgrades(
         fact.verdict = j.downgrade_to
         fact.severity = None
     return notes
+
+
+_JUDGE_INSTRUCTIONS = """\
+You are a strict evidence auditor for a fact-checking desk. You do NOT decide
+whether the claim is true from your own knowledge. You judge ONLY whether the
+evidence below justifies the verdict that was given.
+
+Rate five axes, each 0, 1 or 2:
+- support: does the excerpted evidence entail the verdict? (for True: confirm
+  the claim; for False: explicitly contradict it; for Misleading: show it
+  distorts reality). 0 = it does not, or it points the other way.
+- metric_fidelity: is the evidence about exactly the same metric, period and
+  territory as the claim? (headline CPI is not food inflation; nominal is not
+  real; year-on-year is not cumulative; a different year is not this year.)
+- date_fit: is every relied-on source dated at or before the debate date and
+  fresh enough for the claim's time frame? A source marked "PUBLISHED AFTER
+  THE DEBATE DATE" cannot support anything. Undated sources score at most 1.
+- coverage: does the evidence address the claim as a WHOLE, or only a part?
+- independence: do two or more genuinely independent sources agree (not one
+  wire story republished)? One source = 1.
+
+Set recommend_downgrade=true only if the verdict should be withdrawn to
+Unverified because this evidence cannot carry it. A sources marked NOT READ
+tell you nothing either way. List concrete problems in `issues`, in Slovak,
+one short sentence each. Be strict but fair: do not invent problems.
+"""
+
+
+def build_judge_prompt(
+    fact: VerifiedFact, debate_date: date | None, pages: list[PageResult]
+) -> str:
+    ref = debate_date.isoformat() if debate_date else "unknown"
+    kws = claim_keywords(fact.claim)
+    blocks: list[str] = []
+    for i, p in enumerate(pages, 1):
+        if p.status == "ok":
+            late = ""
+            pub = parse_iso_date(p.published)
+            if debate_date and pub and pub > debate_date:
+                late = "  !! PUBLISHED AFTER THE DEBATE DATE\n"
+            blocks.append(
+                f"[{i}] {p.url}\n  title: {p.title or '(none)'}\n"
+                f"  published: {p.published or 'unknown'}\n{late}"
+                f"  excerpt: {window_around_keywords(p.text, kws)}"
+            )
+        else:
+            blocks.append(f"[{i}] {p.url}\n  NOT READ ({p.status}: {p.detail})")
+    return (
+        f"{_JUDGE_INSTRUCTIONS}\n"
+        f"DEBATE DATE (reference 'now'): {ref}\n\n"
+        f"CLAIM: {fact.claim}\n"
+        f"SPEAKER QUOTE: {fact.quote}\n"
+        f"VERDICT GIVEN: {fact.verdict.value}"
+        f"{' / ' + fact.severity.value if fact.severity else ''}\n"
+        f"RATIONALE GIVEN: {fact.rationale[:1200]}\n\n"
+        "CITED EVIDENCE:\n" + "\n\n".join(blocks)
+    )
+
+
+def judge_fact(
+    fact: VerifiedFact,
+    fact_index: int,
+    debate_date: date | None,
+    *,
+    fetch: Callable[[str], PageResult] = fetch_page,
+    llm: Callable[[str], JudgeOutput],
+    max_sources: int = 4,
+) -> FactJudgement:
+    base = dict(fact_index=fact_index, claim=fact.claim, verdict=fact.verdict.value)
+    if fact.verdict not in _JUDGED:
+        return FactJudgement(**base, assessable=False, reason="verdict not judged")
+    if not fact.sources:
+        return FactJudgement(**base, assessable=False, reason="no sources cited")
+
+    pages = [fetch(u) for u in fact.sources[:max_sources]]
+    readable = [p for p in pages if p.status == "ok"]
+    if not readable:
+        return FactJudgement(**base, assessable=False, reason="no cited source could be read")
+
+    out = llm(build_judge_prompt(fact, debate_date, pages))
+    return FactJudgement(
+        **base,
+        assessable=True,
+        sources_read=len(readable),
+        quality=quality_score(out.axes),
+        axes=out.axes,
+        issues=list(out.issues),
+        downgrade_to=forced_downgrade(fact.verdict, out.axes, out.recommend_downgrade),
+    )
+
+
+def judge_facts(
+    facts: list[VerifiedFact],
+    debate_date: date | None,
+    *,
+    fetch: Callable[[str], PageResult] = fetch_page,
+    llm: Callable[[str], JudgeOutput],
+    max_workers: int = 4,
+) -> JudgeSummary:
+    def _one(item: tuple[int, VerifiedFact]) -> FactJudgement:
+        i, f = item
+        return judge_fact(f, i, debate_date, fetch=fetch, llm=llm)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        judgements = list(pool.map(_one, enumerate(facts)))  # map preserves order
+    return summarize(judgements)
+
+
+def default_judge_llm(settings) -> Callable[[str], JudgeOutput]:
+    from src.llm import generate_json
+
+    model = settings.judge_model or settings.gemini_model
+    return lambda prompt: generate_json(
+        prompt, JudgeOutput, settings, label="judge", model=model
+    )

@@ -36,7 +36,17 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 900.0
 
     # Fact pipeline
-    max_claims: int = 30  # top-N claims (by salience) forwarded to fact-checkers
+    # Cost fuse for the adaptive claim selection (was: a hard top-N cut).
+    max_claims: int = 40
+    # Adaptive selection: research every empirical claim with consequence >=
+    # threshold; every speaker always keeps their top `floor` claims.
+    consequence_threshold: int = 3
+    claims_floor_per_speaker: int = 2
+    # Phase 0: political briefing researched before extraction.
+    briefing_enabled: bool = True
+    # Evidence judge: audits cited pages, may downgrade unsupported verdicts.
+    judge_enabled: bool = False
+    judge_model: str | None = None  # None = same as gemini_model
     # Fact-check manager (Phase B2): round 1 audits all checked claims;
     # further rounds re-verify only escalated (Unverified/Contested with a
     # concrete lead) claims. 0 disables the manager.

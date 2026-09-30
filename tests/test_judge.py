@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from src.agents import Severity, Verdict, VerifiedFact
 from src.judge import (
     FactJudgement,
     JudgeAxes,
+    JudgeOutput,
     apply_judge_downgrades,
+    build_judge_prompt,
     forced_downgrade,
+    judge_fact,
+    judge_facts,
     quality_score,
     summarize,
 )
+from src.tools.page import PageResult
 
 
 def axes(s=2, m=2, d=2, c=2, i=2) -> JudgeAxes:
@@ -89,3 +96,90 @@ def test_apply_downgrades_mutates_and_clears_severity() -> None:
     assert facts[0].severity is None
     assert facts[1].verdict == Verdict.TRUE
     assert len(notes) == 1 and "False->Unverified" in notes[0]
+
+
+DEBATE = date(2026, 4, 12)
+
+
+def page_ok(url="https://a.sk/x", published="2026-03-01", text="Deficit verejných financií za rok 2025 dosiahol 5,3 % HDP."):
+    return PageResult("ok", url, final_url=url, title="t", published=published, text=text)
+
+
+class RecordingLLM:
+    def __init__(self, out: JudgeOutput):
+        self.out = out
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> JudgeOutput:
+        self.prompts.append(prompt)
+        return self.out
+
+
+def good_out(**kw) -> JudgeOutput:
+    return JudgeOutput(axes=axes(**kw), issues=[], recommend_downgrade=False)
+
+
+def test_prompt_contains_excerpt_dates_and_flags_anachronism() -> None:
+    fact = make_fact()
+    late = page_ok("https://b.sk/y", published="2026-05-01")
+    prompt = build_judge_prompt(fact, DEBATE, [page_ok(), late])
+    assert "5,3 % HDP" in prompt
+    assert "2026-04-12" in prompt
+    assert prompt.count("PUBLISHED AFTER THE DEBATE DATE") == 1
+    assert fact.claim in prompt
+
+
+def test_prompt_marks_unread_sources() -> None:
+    prompt = build_judge_prompt(
+        make_fact(), DEBATE, [PageResult("inconclusive", "https://c.sk/z", detail="HTTP 403")]
+    )
+    assert "NOT READ" in prompt and "HTTP 403" in prompt
+
+
+def test_judge_fact_scores_from_axes_not_from_model() -> None:
+    llm = RecordingLLM(good_out(s=2, m=1, d=2, c=2, i=1))
+    j = judge_fact(make_fact(), 0, DEBATE, fetch=lambda u: page_ok(u), llm=llm)
+    assert j.assessable and j.sources_read == 1
+    assert j.quality == quality_score(axes(2, 1, 2, 2, 1))
+    assert j.downgrade_to is None
+    assert len(llm.prompts) == 1
+
+
+def test_judge_fact_downgrades_on_zero_support() -> None:
+    llm = RecordingLLM(JudgeOutput(axes=axes(s=0), issues=["zdroj tvrdenie nepodporuje"]))
+    j = judge_fact(make_fact(Verdict.FALSE), 3, DEBATE, fetch=lambda u: page_ok(u), llm=llm)
+    assert j.fact_index == 3
+    assert j.downgrade_to == Verdict.UNVERIFIED
+    assert j.issues == ["zdroj tvrdenie nepodporuje"]
+
+
+def test_judge_fact_unassessable_when_nothing_readable_skips_llm() -> None:
+    llm = RecordingLLM(good_out())
+    j = judge_fact(
+        make_fact(),
+        0,
+        DEBATE,
+        fetch=lambda u: PageResult("inconclusive", u, detail="HTTP 403"),
+        llm=llm,
+    )
+    assert not j.assessable
+    assert llm.prompts == []
+
+
+def test_judge_fact_skips_unverified_and_unsourced() -> None:
+    llm = RecordingLLM(good_out())
+    unv = make_fact(Verdict.UNVERIFIED)
+    assert not judge_fact(unv, 0, DEBATE, fetch=lambda u: page_ok(u), llm=llm).assessable
+    nosrc = make_fact(Verdict.TRUE)
+    nosrc.sources = []
+    assert not judge_fact(nosrc, 0, DEBATE, fetch=lambda u: page_ok(u), llm=llm).assessable
+    assert llm.prompts == []
+
+
+def test_judge_facts_keeps_order_and_summarizes() -> None:
+    llm = RecordingLLM(good_out())
+    facts = [make_fact(Verdict.TRUE), make_fact(Verdict.UNVERIFIED), make_fact(Verdict.FALSE)]
+    summary = judge_facts(facts, DEBATE, fetch=lambda u: page_ok(u), llm=llm, max_workers=2)
+    assert [j.fact_index for j in summary.judgements] == [0, 1, 2]
+    assert summary.judged == 2 and summary.skipped == 1
+    assert summary.mean_quality == 100.0
