@@ -14,9 +14,16 @@ here; import inside functions.
 
 from __future__ import annotations
 
+import logging
+from datetime import date
 from enum import Enum
+from typing import Callable
 
 from pydantic import BaseModel, Field
+
+from src.llm import GroundedAnswer
+
+logger = logging.getLogger(__name__)
 
 
 class Side(str, Enum):
@@ -184,3 +191,101 @@ def render_briefing(briefing: DebateBriefing, max_chars: int = 7000) -> str:
         out.append(line)
         size += len(line) + 1
     return "\n".join(out)
+
+
+_RESEARCH_HEADER = (
+    "Si politický redaktor, ktorý pripravuje podklady pred spracovaním televíznej "
+    "debaty. DÁTUM DEBATY (referenčné 'teraz'): {ref}. Používaj iba informácie a "
+    "zdroje datované do {ref}; nič neskoršie neuvádzaj. Píš vecne a opisne — "
+    "nehodnoť, kto má pravdu, žiadne názory ani hodnotiace prívlastky. U každého "
+    "údaja uveď dátum a vyhľadaj ho cez Google Search.\n\nPREPIS DEBATY:\n{transcript}\n\n"
+)
+
+_RESEARCH_TASKS = (
+    # A: who is who
+    "ÚLOHA: Identifikuj každého hosťa debaty (meno, strana, funkcia k dátumu "
+    "debaty, či ide o koalíciu alebo opozíciu, predchádzajúce funkcie, agendy, "
+    "ktoré drží). Potom nájdi VŠETKY odkazy na funkcie, ktoré v prepise zaznievajú "
+    "('predseda vlády', 'prezident Poľska', 'minister financií', 'šéf Európskej "
+    "komisie' …) a pre každý uveď, kto túto funkciu zastával k dátumu debaty.",
+    # B: disputes and stakes
+    "ÚLOHA: Urči 3 až 6 vecných sporov, o ktoré sa debata v skutočnosti opiera. "
+    "Pri každom uveď: názov, overiteľnú faktickú otázku, ktorá je pod ním, a čo je "
+    "v stávke pre voliča pri posudzovaní rečníka (peniaze, zodpovednosť, záznam, "
+    "politika) — opisne, bez hodnotenia. Použi aktuálne spravodajstvo k týmto témam.",
+    # C: timeline and glossary
+    "ÚLOHA: Zostav časovú os udalostí z posledných ~90 dní pred dátumom debaty, "
+    "ktoré súvisia so sporovými témami debaty (každá s presným dátumom YYYY-MM-DD). "
+    "Potom vysvetli odborné pojmy a kauzy, ktoré v debate zaznievajú (neutrálna "
+    "jednovetová definícia a stav veci k dátumu debaty).",
+)
+
+_STRUCTURE_PROMPT = (
+    "Z nasledujúcich poznámok zostav štruktúrovaný politický brief debaty.\n"
+    "PRAVIDLÁ:\n"
+    "- Použi IBA fakty z poznámok; nič nedopĺňaj z vlastných znalostí.\n"
+    "- Pole `sources` smie obsahovať IBA URL zo zoznamu ALLOWED_URLS nižšie, a to "
+    "len tie, ktoré danú položku skutočne podporujú. Nevymýšľaj URL.\n"
+    "- Dátumy vo formáte YYYY-MM-DD. Nič po dátume debaty ({ref}).\n"
+    "- Opisuj, nehodnoť. Text píš po slovensky.\n"
+    "- debate_date = {ref}.\n\n"
+    "ALLOWED_URLS:\n{urls}\n\n"
+    "POZNÁMKY A (účastníci, funkcie):\n{a}\n\n"
+    "POZNÁMKY B (spory, čo je v stávke):\n{b}\n\n"
+    "POZNÁMKY C (časová os, pojmy):\n{c}\n"
+)
+
+
+def run_briefing(
+    transcript: str,
+    debate_date: date,
+    settings=None,
+    *,
+    search: Callable[[str], GroundedAnswer] | None = None,
+    structure: Callable[[str], DebateBriefing] | None = None,
+) -> tuple[DebateBriefing, list[str]]:
+    """Research + structure + filter. `search`/`structure` are injectable for tests."""
+    if search is None or structure is None:
+        from config import get_settings
+        from src.llm import generate_json, grounded_search
+
+        settings = settings or get_settings()
+        search = search or (
+            lambda p: grounded_search(p, settings, label="briefing_research")
+        )
+        structure = structure or (
+            lambda p: generate_json(p, DebateBriefing, settings, label="briefing_structure")
+        )
+
+    ref = debate_date.isoformat()
+    notes: list[str] = []
+    answers: list[GroundedAnswer | None] = []
+    for i, task in enumerate(_RESEARCH_TASKS, 1):
+        prompt = _RESEARCH_HEADER.format(ref=ref, transcript=transcript) + task
+        try:
+            answers.append(search(prompt))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Briefing research call %d failed: %s", i, exc)
+            notes.append(f"Briefing: research call {i} failed ({exc}); continuing without it.")
+            answers.append(None)
+
+    urls: list[str] = []
+    for a in answers:
+        for u in (a.urls if a else []):
+            if u not in urls:
+                urls.append(u)
+    text = [(a.text if a else "(výskum zlyhal)") for a in answers]
+
+    briefing = structure(
+        _STRUCTURE_PROMPT.format(
+            ref=ref,
+            urls="\n".join(urls) or "(žiadne)",
+            a=text[0],
+            b=text[1],
+            c=text[2],
+        )
+    )
+    briefing = briefing.model_copy(update={"debate_date": ref})
+    filtered, filter_notes = filter_briefing(briefing, set(urls), debate_date)
+    notes.extend(filter_notes)
+    return filtered, notes

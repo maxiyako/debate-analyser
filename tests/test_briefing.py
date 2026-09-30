@@ -14,7 +14,9 @@ from src.briefing import (
     TimelineEvent,
     filter_briefing,
     render_briefing,
+    run_briefing,
 )
+from src.llm import GroundedAnswer
 
 DEBATE = date(2026, 4, 12)
 GOOD = "https://www.sme.sk/c/1/clanok.html"
@@ -84,3 +86,45 @@ def test_render_respects_max_chars_on_line_boundary() -> None:
     text = render_briefing(b, max_chars=1000)
     assert len(text) <= 1000
     assert not text.endswith("E" * 3 + "\n\n")
+
+
+def test_run_briefing_unions_urls_filters_and_builds_three_research_prompts() -> None:
+    searched: list[str] = []
+
+    def search(prompt: str) -> GroundedAnswer:
+        searched.append(prompt)
+        return GroundedAnswer(text=f"poznámky {len(searched)}", urls=[GOOD] if len(searched) == 1 else [OTHER])
+
+    seen_structure: list[str] = []
+
+    def structure(prompt: str) -> DebateBriefing:
+        seen_structure.append(prompt)
+        return make_briefing()
+
+    briefing, notes = run_briefing(
+        "Moderátor [00:01]: Dobrý večer.", DEBATE, search=search, structure=structure
+    )
+    assert len(searched) == 3
+    assert all("2026-04-12" in p and "Dobrý večer" in p for p in searched)
+    assert len(seen_structure) == 1
+    assert GOOD in seen_structure[0] and OTHER in seen_structure[0]
+    assert "poznámky 1" in seen_structure[0] and "poznámky 3" in seen_structure[0]
+    assert briefing.debate_date == "2026-04-12"
+    assert [t.event for t in briefing.timeline] == ["Komisia zmrazila fondy"]  # FAKE/late/unsourced removed
+    assert any("after debate date" in n for n in notes)
+
+
+def test_run_briefing_survives_one_failed_research_call() -> None:
+    calls = {"n": 0}
+
+    def search(prompt: str) -> GroundedAnswer:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return GroundedAnswer(text="ok", urls=[GOOD])
+
+    briefing, notes = run_briefing(
+        "t", DEBATE, search=search, structure=lambda p: make_briefing()
+    )
+    assert any("research call" in n and "failed" in n for n in notes)
+    assert briefing.participants
