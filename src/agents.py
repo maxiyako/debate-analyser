@@ -731,35 +731,9 @@ def _build_sk_source_search_tool(
     return SlovakSourceSearchTool()
 
 
-_META_DATE_RES = [
-    # <meta property="article:published_time" content="2026-06-01T...">
-    re.compile(
-        r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|'
-        r'datePublished|date|dc\.date|publish-date|publication_date)["\']'
-        r'[^>]+content=["\']([^"\']+)["\']',
-        re.IGNORECASE,
-    ),
-    # reversed attribute order
-    re.compile(
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)='
-        r'["\'](?:article:published_time|datePublished|date)["\']',
-        re.IGNORECASE,
-    ),
-    # JSON-LD "datePublished": "..."
-    re.compile(r'"datePublished"\s*:\s*"([^"]+)"'),
-    # <time datetime="...">
-    re.compile(r'<time[^>]+datetime=["\']([^"\']+)["\']', re.IGNORECASE),
-]
-_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+from src.tools.page import _TITLE_RE, extract_pub_date as _extract_pub_date  # noqa: E402
+
 _TAG_RE = re.compile(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", re.IGNORECASE | re.DOTALL)
-
-
-def _extract_pub_date(html: str) -> str:
-    for rx in _META_DATE_RES:
-        m = rx.search(html)
-        if m:
-            return m.group(1).strip()[:25]
-    return ""
 
 
 def _html_to_text(html: str, limit: int = 1800) -> str:

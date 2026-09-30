@@ -31,6 +31,7 @@ ddgs>=6.0
 
 # HTTP utilities
 requests>=2.31
+trafilatura>=1.12
 
 # Testing
 pytest>=8.0
