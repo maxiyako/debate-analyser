@@ -1,0 +1,36 @@
+# Core
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+click>=8.1
+
+# Ingestion
+yt-dlp>=2025.1.0
+
+# Transcription / diarization
+torch>=2.2
+torchaudio>=2.2
+transformers>=4.40
+accelerate>=0.30
+pyannote.audio>=3.1
+soundfile>=0.12
+numpy>=1.26
+
+# Agents
+crewai>=0.80
+crewai-tools>=0.14
+litellm>=1.50
+google-genai>=1.0
+google-cloud-aiplatform>=1.70
+
+# GCS
+google-cloud-storage>=2.18
+
+# Fact-checking: free Slovak-source search (no API key)
+ddgs>=6.0
+
+# HTTP utilities
+requests>=2.31
+
+# Testing
+pytest>=8.0
