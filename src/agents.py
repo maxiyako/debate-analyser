@@ -267,6 +267,15 @@ class ClaimCategory(str, Enum):
     CURRENT_EVENTS = "current_events"
 
 
+class Checkability(str, Enum):
+    """Only empirical claims enter fact-checking and scoring."""
+
+    EMPIRICAL = "empirical"  # verifiable against records, data, or reporting
+    OPINION = "opinion"  # value judgement, evaluation, rhetoric
+    PREDICTION = "prediction"  # about the future
+    DEFINITIONAL = "definitional"  # about meaning of a term, translation, semantics
+
+
 class ExtractedClaim(BaseModel):
     id: int = Field(description="Stable 1-based claim id for cross-agent matching.")
     claim: str
@@ -292,6 +301,29 @@ class ExtractedClaim(BaseModel):
     usage_reason: str = Field(
         default="",
         description="One short sentence justifying the usage/salience rating.",
+    )
+    consequence: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description=(
+            "Political consequence of the claim for how a voter judges the speaker, "
+            "measured against the briefing's disputes and stakes: 5 = decides a "
+            "central dispute (money, responsibility, record); 1 = trivia."
+        ),
+    )
+    consequence_reason: str = Field(
+        default="",
+        description="One short sentence naming the dispute/stake the rating rests on.",
+    )
+    checkability: Checkability = Field(
+        default=Checkability.EMPIRICAL,
+        description="empirical / opinion / prediction / definitional.",
+    )
+    repeats: int = Field(
+        default=1,
+        ge=1,
+        description="How many times the speaker made this claim (set in code when merging duplicates).",
     )
     category: ClaimCategory = Field(
         default=ClaimCategory.CURRENT_EVENTS,
