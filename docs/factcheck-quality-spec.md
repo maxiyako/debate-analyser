@@ -411,3 +411,12 @@ Observed against the definition of done:
 - Found and fixed during the run: concurrent `trafilatura`/lxml extraction aborted the process
   (libxml2 malloc abort); extraction is now serialized and a judge failure no longer loses the
   report.
+
+### Second debate: 620752 (2026-09-27, Tomáš vs Viskupič, budget debate)
+
+Full pipeline run (download, ASR, briefing, extraction, check, judge), then re-run from the stored transcript.
+
+- Briefing: 2 participants, 4 disputes (public finances, pro-family measures, transaction tax, fuel prices), 10 sourced timeline events, none after the debate date.
+- Extraction: the crew's extraction task returned `{"claims":[]}` on the first run (zero facts), and again on the first standalone retry; the second standalone retry returned 24 claims. Fix: `retry_empty_extraction` (up to 2 standalone retries without the behavioral context). Root cause of the empty answer is unknown (flaky model behaviour; the same prompt yielded 30 claims standalone).
+- Result: 22 facts (True 8, Unverified 10, Misleading 3, False 1), 1 non-empirical claim excluded. Judge: mean quality 60.5 over 21 judged facts, 9 downgrades to Unverified. Cost ≈ $6.44.
+- Weak spot (input for steps 3–5): downgrades mostly come from sources that were not read (official pages the fetcher could not open), excerpts without the needed numbers, and one source published after the debate date. The per-claim research loop and tiered sources are meant to address exactly this.
