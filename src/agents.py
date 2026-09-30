@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from config import Settings, get_settings
 from src.costs import TRACKER
+from src.briefing import DebateBriefing
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,10 @@ class AnalysisReport(BaseModel):
     moderator_audit: ModeratorAudit = Field(default_factory=ModeratorAudit)
     facts: list[VerifiedFact] = Field(default_factory=list)
     critic_notes: list[str] = Field(default_factory=list)
+    briefing: DebateBriefing | None = Field(
+        default=None,
+        description="Phase 0 political briefing (background only, never evidence).",
+    )
 
 
 class ClaimHighlight(BaseModel):
@@ -1133,10 +1138,56 @@ def select_top_claims(
     return kept, notes
 
 
+_IMPORTANCE_LEGACY = (
+    "IMPORTANCE (salience 1-5): rate each claim by its ROLE IN THE DEBATE, "
+    "not by how easy it is to verify. Use the Behavioral Analyst's findings "
+    "(attacks, manipulation, deflections) from the prior task as evidence:\n"
+    "- 5 = the claim is used as a COUNTERARGUMENT to an opponent, an ATTACK "
+    "on an opponent, or a DEFLECTION/smokescreen to dodge a question.\n"
+    "- 4 = repeated multiple times or central to the debate's main topic.\n"
+    "- 3 = relevant supporting fact for the speaker's argument.\n"
+    "- 2-1 = side mention, common knowledge, or trivial detail — these are "
+    "NOT worth fact-checking; be strict and rate them low.\n"
+    "Set `usage` (counterargument/attack/deflection/supporting/other) and a "
+    "one-sentence `usage_reason`.\n\n"
+)
+
+_IMPORTANCE_CONSEQUENCE = (
+    "CONSEQUENCE (consequence 1-5): rate each claim by its POLITICAL CONSEQUENCE, "
+    "judged against the SPORNÉ TÉMY (disputes and stakes) in the briefing above — "
+    "not by rhetorical flourish and not by how easy it is to verify:\n"
+    "- 5 = decides a central dispute: money, responsibility, or a politician's "
+    "record that changes how a voter judges the speaker.\n"
+    "- 4 = bears directly on a live dispute or on a named actor's conduct.\n"
+    "- 3 = relevant supporting fact for an argument about a live dispute.\n"
+    "- 2-1 = side mention, common knowledge, translation/semantics, trivia "
+    "unrelated to any dispute — be strict and rate these low.\n"
+    "Write a one-sentence `consequence_reason` naming the dispute/stake. Set "
+    "`usage` (counterargument/attack/deflection/supporting/other) and "
+    "`usage_reason` as before; usage is only a secondary signal.\n"
+    "CHECKABILITY: set `checkability` to empirical (verifiable against records, "
+    "data or reporting), opinion (value judgement or evaluation), prediction "
+    "(about the future) or definitional (meaning of a term, translation, "
+    "semantics). Only empirical claims will be fact-checked.\n"
+    "ENTITY RESOLUTION: in `context`, resolve vague role references "
+    "('prezident Poľska', 'minister financií', 'bývalá vláda') to the concrete "
+    "person or government using the briefing's FUNKCIE list, valid on the debate "
+    "date. The briefing is BACKGROUND for understanding what the claim refers to; "
+    "it is not evidence for or against the claim.\n\n"
+)
+
+
+def _importance_block(briefing_text: str) -> str:
+    if not briefing_text:
+        return _IMPORTANCE_LEGACY
+    return f"{briefing_text}\n\n{_IMPORTANCE_CONSEQUENCE}"
+
+
 def build_extract_crew(
     transcript: str,
     settings: Settings | None = None,
     debate_date: "date | None" = None,
+    briefing_text: str = "",
 ):
     """Phase A: behavioral + moderator analysis and context-aware claim extraction."""
     from crewai import Agent, Crew, Process, Task
@@ -1249,17 +1300,7 @@ def build_extract_crew(
             "transcript that the claim is based on (do not paraphrase or reconstruct — "
             "copy the exact words). If you cannot find an exact supporting excerpt, do "
             "not include the claim. Ignore opinions.\n\n"
-            "IMPORTANCE (salience 1-5): rate each claim by its ROLE IN THE DEBATE, "
-            "not by how easy it is to verify. Use the Behavioral Analyst's findings "
-            "(attacks, manipulation, deflections) from the prior task as evidence:\n"
-            "- 5 = the claim is used as a COUNTERARGUMENT to an opponent, an ATTACK "
-            "on an opponent, or a DEFLECTION/smokescreen to dodge a question.\n"
-            "- 4 = repeated multiple times or central to the debate's main topic.\n"
-            "- 3 = relevant supporting fact for the speaker's argument.\n"
-            "- 2-1 = side mention, common knowledge, or trivial detail — these are "
-            "NOT worth fact-checking; be strict and rate them low.\n"
-            "Set `usage` (counterargument/attack/deflection/supporting/other) and a "
-            "one-sentence `usage_reason`.\n\n"
+            f"{_importance_block(briefing_text)}"
             "CATEGORY: classify each claim for specialist routing:\n"
             "- economy_finance: budget, deficit, debt, consolidation, taxes, salaries "
             "of officials, public spending.\n"
@@ -1283,8 +1324,8 @@ def build_extract_crew(
         ),
         expected_output=(
             "ExtractedClaims JSON: list of {id, claim, speaker, quote, salience, "
-            "usage, usage_reason, category, context, time_reference, time_window} "
-            "with sequential ids."
+            "usage, usage_reason, consequence, consequence_reason, checkability, "
+            "category, context, time_reference, time_window} with sequential ids."
         ),
         agent=fact_extractor,
         context=[t_behavioral],
@@ -1851,9 +1892,37 @@ def run_analysis(
             text=transcript, notes=[*corrected.notes, "Correction rejected (word drift)"]
         )
 
+    # Phase 0: political briefing (background only — never evidence).
+    briefing: DebateBriefing | None = None
+    briefing_text = ""
+    if settings.briefing_enabled and debate_date is not None:
+        from src.briefing import render_briefing, run_briefing
+
+        try:
+            briefing, briefing_notes = run_briefing(working, debate_date, settings)
+            briefing_text = render_briefing(briefing)
+            pipeline_notes.extend(briefing_notes)
+            logger.info(
+                "Briefing: %d participants, %d disputes, %d timeline events",
+                len(briefing.participants),
+                len(briefing.live_disputes),
+                len(briefing.timeline),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Briefing failed; continuing with legacy extraction")
+            pipeline_notes.append(
+                f"Briefing failed ({exc}); used legacy salience-based selection."
+            )
+            briefing = None
+    elif settings.briefing_enabled:
+        pipeline_notes.append("Briefing skipped: no --debate-date given.")
+
     # Phase A: behavioral + moderator + context-aware extraction.
     extract_crew, a_tasks = build_extract_crew(
-        working, settings=settings, debate_date=debate_date
+        working,
+        settings=settings,
+        debate_date=debate_date,
+        briefing_text=briefing_text,
     )
     a_result = extract_crew.kickoff()
     TRACKER.add_crew("analysis_extract", a_result)
@@ -1865,7 +1934,17 @@ def run_analysis(
     # Top-N salience cut (deterministic, in code).
     kept_claims: list[ExtractedClaim] = []
     if extracted and extracted.claims:
-        kept_claims, cap_notes = select_top_claims(extracted, settings.max_claims)
+        if briefing is not None:
+            from src.selection import select_claims
+
+            kept_claims, cap_notes = select_claims(
+                extracted.claims,
+                threshold=settings.consequence_threshold,
+                floor_per_speaker=settings.claims_floor_per_speaker,
+                fuse=settings.max_claims,
+            )
+        else:
+            kept_claims, cap_notes = select_top_claims(extracted, min(settings.max_claims, 30))
         pipeline_notes.extend(cap_notes)
         logger.info(
             "Extracted %d claims, keeping %d (max_claims=%d)",
@@ -1952,6 +2031,7 @@ def run_analysis(
                 break
 
     report.facts = facts
+    report.briefing = briefing
     notes = [*pipeline_notes, *reconcile_notes, *manager_notes]
     if notes:
         report.critic_notes = [*report.critic_notes, *notes]
