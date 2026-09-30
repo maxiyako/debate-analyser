@@ -1138,6 +1138,48 @@ def select_top_claims(
     return kept, notes
 
 
+def retry_empty_extraction(
+    first: "ExtractedClaims | None",
+    rerun: "Callable[[], ExtractedClaims | None]",
+    attempts: int = 2,
+) -> tuple["ExtractedClaims | None", list[str]]:
+    """Re-run extraction when it came back empty (seen in production: the full
+    crew returned {"claims":[]} for a 78-minute debate, standalone got 30)."""
+    notes: list[str] = []
+    result = first
+    for n in range(1, attempts + 1):
+        if result is not None and result.claims:
+            break
+        logger.warning("Extraction returned no claims; standalone retry %d/%d", n, attempts)
+        try:
+            result = rerun()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Extraction retry failed")
+            notes.append(f"Extraction retry {n} failed ({exc}).")
+            continue
+        if result is not None and result.claims:
+            notes.append(f"Extraction was empty in the crew run; recovered {len(result.claims)} claims on standalone retry {n}.")
+    return result, notes
+
+
+def _extract_standalone(working, settings, debate_date, briefing_text):
+    """Run only the extraction task, without the behavioral-analysis context."""
+    from crewai import Crew, Process
+
+    from src.reconcile import parse_task_output
+
+    _crew, tasks = build_extract_crew(
+        working, settings=settings, debate_date=debate_date, briefing_text=briefing_text
+    )
+    task = tasks["extract"]
+    task.context = []
+    result = Crew(
+        agents=[task.agent], tasks=[task], process=Process.sequential, verbose=False
+    ).kickoff()
+    TRACKER.add_crew("analysis_extract_retry", result)
+    return parse_task_output(task, ExtractedClaims)
+
+
 _IMPORTANCE_LEGACY = (
     "IMPORTANCE (salience 1-5): rate each claim by its ROLE IN THE DEBATE, "
     "not by how easy it is to verify. Use the Behavioral Analyst's findings "
@@ -1929,6 +1971,11 @@ def run_analysis(
     TRACKER.add_crew("analysis_extract", a_result)
 
     extracted = parse_task_output(a_tasks["extract"], ExtractedClaims)
+    extracted, retry_notes = retry_empty_extraction(
+        extracted,
+        lambda: _extract_standalone(working, settings, debate_date, briefing_text),
+    )
+    pipeline_notes.extend(retry_notes)
     behavioral_raw = getattr(a_tasks["behavioral"].output, "raw", "") or ""
     moderator_raw = getattr(a_tasks["moderator"].output, "raw", "") or ""
 
