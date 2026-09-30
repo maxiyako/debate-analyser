@@ -22,3 +22,12 @@ def test_consequence_block_embeds_briefing_and_rules() -> None:
 
 def test_report_briefing_defaults_to_none() -> None:
     assert AnalysisReport().briefing is None
+
+
+def test_publisher_prompt_excludes_briefing() -> None:
+    import inspect
+
+    from src.agents import generate_facebook_post
+
+    src = inspect.getsource(generate_facebook_post)
+    assert 'exclude={"briefing"}' in src

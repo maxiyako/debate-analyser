@@ -1914,6 +1914,7 @@ def run_analysis(
                 f"Briefing failed ({exc}); used legacy salience-based selection."
             )
             briefing = None
+            briefing_text = ""
     elif settings.briefing_enabled:
         pipeline_notes.append("Briefing skipped: no --debate-date given.")
 
@@ -1931,7 +1932,8 @@ def run_analysis(
     behavioral_raw = getattr(a_tasks["behavioral"].output, "raw", "") or ""
     moderator_raw = getattr(a_tasks["moderator"].output, "raw", "") or ""
 
-    # Top-N salience cut (deterministic, in code).
+    # Claim selection (deterministic, in code): consequence-based when a briefing
+    # exists, otherwise the legacy salience top-N.
     kept_claims: list[ExtractedClaim] = []
     if extracted and extracted.claims:
         if briefing is not None:
@@ -2071,7 +2073,11 @@ def generate_facebook_post(
         raise RuntimeError("GCP_PROJECT_ID is not configured")
 
     llm = build_llm(settings)
-    report_json = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    report_json = json.dumps(
+        report.model_dump(mode="json", exclude={"briefing"}),  # briefing is background only
+        ensure_ascii=False,
+        indent=2,
+    )
     verdict_json = json.dumps(
         verdict.model_dump(mode="json") if hasattr(verdict, "model_dump") else verdict,
         ensure_ascii=False,

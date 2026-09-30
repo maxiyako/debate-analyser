@@ -183,3 +183,21 @@ def test_judge_facts_keeps_order_and_summarizes() -> None:
     assert [j.fact_index for j in summary.judgements] == [0, 1, 2]
     assert summary.judged == 2 and summary.skipped == 1
     assert summary.mean_quality == 100.0
+
+
+def test_judge_facts_isolates_a_failing_fact() -> None:
+    def flaky_fetch(url: str) -> PageResult:
+        if url.endswith("/boom"):
+            raise RuntimeError("parser crashed")
+        return page_ok(url)
+
+    bad = make_fact(Verdict.FALSE)
+    bad.sources = ["https://a.sk/boom"]
+    facts = [make_fact(Verdict.TRUE), bad, make_fact(Verdict.FALSE)]
+    summary = judge_facts(
+        facts, DEBATE, fetch=flaky_fetch, llm=RecordingLLM(good_out()), max_workers=2
+    )
+    assert [j.fact_index for j in summary.judgements] == [0, 1, 2]
+    assert summary.judgements[1].assessable is False
+    assert "parser crashed" in summary.judgements[1].reason
+    assert summary.judged == 2

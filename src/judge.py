@@ -10,6 +10,7 @@ for).
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Callable
@@ -34,6 +35,8 @@ _WEIGHTS = {
     "coverage": 0.15,
     "independence": 0.10,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class JudgeAxes(BaseModel):
@@ -170,7 +173,7 @@ Rate five axes, each 0, 1 or 2:
   wire story republished)? One source = 1.
 
 Set recommend_downgrade=true only if the verdict should be withdrawn to
-Unverified because this evidence cannot carry it. A sources marked NOT READ
+Unverified because this evidence cannot carry it. Sources marked NOT READ
 tell you nothing either way. List concrete problems in `issues`, in Slovak,
 one short sentence each. Be strict but fair: do not invent problems.
 """
@@ -249,7 +252,17 @@ def judge_facts(
 ) -> JudgeSummary:
     def _one(item: tuple[int, VerifiedFact]) -> FactJudgement:
         i, f = item
-        return judge_fact(f, i, debate_date, fetch=fetch, llm=llm)
+        try:
+            return judge_fact(f, i, debate_date, fetch=fetch, llm=llm)
+        except Exception as exc:  # noqa: BLE001 - one bad fact must not sink the pass
+            logger.warning("Judge failed for fact %d: %s", i, exc)
+            return FactJudgement(
+                fact_index=i,
+                claim=f.claim,
+                verdict=f.verdict.value,
+                assessable=False,
+                reason=f"judge error: {exc}"[:300],
+            )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         judgements = list(pool.map(_one, enumerate(facts)))  # map preserves order
