@@ -133,15 +133,19 @@ def main(
         from src.judge import apply_judge_downgrades, default_judge_llm, judge_facts
 
         logger.info("=== Evidence judge ===")
-        judge_summary = judge_facts(
-            report.facts, debate_day, llm=default_judge_llm(settings)
-        )
-        judge_notes = apply_judge_downgrades(report.facts, judge_summary.judgements)
-        report.critic_notes = [*report.critic_notes, *judge_notes]
-        click.echo(
-            f"Judge: mean evidence quality {judge_summary.mean_quality} over "
-            f"{judge_summary.judged} facts, {judge_summary.downgrades} downgrades"
-        )
+        try:
+            judge_summary = judge_facts(
+                report.facts, debate_day, llm=default_judge_llm(settings)
+            )
+            judge_notes = apply_judge_downgrades(report.facts, judge_summary.judgements)
+            report.critic_notes = [*report.critic_notes, *judge_notes]
+            click.echo(
+                f"Judge: mean evidence quality {judge_summary.mean_quality} over "
+                f"{judge_summary.judged} facts, {judge_summary.downgrades} downgrades"
+            )
+        except Exception:  # noqa: BLE001 - never lose a finished report to the judge
+            logger.exception("Evidence judge failed; writing report without it")
+            judge_summary = None
 
     verdict = score_report(report, transcript=corrected.text)
     report_path = settings.report_dir / f"{ep_id}.json"

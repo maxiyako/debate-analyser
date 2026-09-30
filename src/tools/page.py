@@ -11,6 +11,7 @@ Three-state fetch semantics mirror `validation.url_reachable`:
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from datetime import date
 from typing import Callable
@@ -81,12 +82,19 @@ def _html_to_text(html: str, limit: int = 50_000) -> str:
     return text[:limit]
 
 
+# lxml (used by trafilatura) is not thread-safe here: concurrent extraction
+# crashed the process with a libxml2 malloc abort. Network fetches stay
+# concurrent; only the parse step is serialized.
+_EXTRACT_LOCK = threading.Lock()
+
+
 def extract_text(html: str) -> str:
     """Main-content text: trafilatura when available, regex strip otherwise."""
     try:
         import trafilatura
 
-        text = trafilatura.extract(html, include_comments=False, favor_recall=True)
+        with _EXTRACT_LOCK:
+            text = trafilatura.extract(html, include_comments=False, favor_recall=True)
         if text:
             return re.sub(r"[ \t]+", " ", text).strip()[:50_000]
     except ImportError:
