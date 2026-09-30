@@ -379,3 +379,35 @@ replaced.
 - The judge's run-level quality score improves against the step-1 baseline on
   the stored reports.
 - Cost stays at or under roughly 3x the current per-debate spend.
+
+## Results: steps 1–2
+
+Acceptance run on debate 591624 (2026-04-12), stored transcript, judge on.
+
+| | Baseline (old pipeline, re-judged) | New (briefing + consequence selection) |
+|---|---|---|
+| Facts checked | 18 | 27 |
+| Judged (assessable verdicts) | 12 | 21 |
+| Mean evidence quality | 64.6 | 83.3 |
+| Quality: True / Misleading / False | 74.4 / 47.5 / 63.8 | 80.9 / 88.3 / 88.1 |
+| Judge downgrades | 5 | 2 |
+| Run cost (token fees) | n/a | ≈ $5.33 (briefing ≈ 4 calls) |
+
+Overall baseline across 9 stored reports: 182 judged facts, mean quality 73.9, 50 downgrades
+(`data/judge_baseline.json`). The 591624 report scores below that average, so the new run
+(83.3) is above both the same-debate baseline and the overall mean. Single debate, single run:
+treat as a smoke signal, not a benchmark.
+
+Observed against the definition of done:
+- Briefing names the four real guests and the veto, rule-of-law double standard, Hungarian
+  election and Iran disputes; no timeline entry after 2026-04-12; unsourced items were dropped
+  in code (6 notes).
+- Trivia/definitional claims did not take a slot; four consequence-2 claims were reported under
+  "Below consequence threshold".
+- Every named speaker has at least 4 checked facts.
+- Known gaps for later steps: facts still carry `Speaker A` / `Speaker D` labels when the
+  corrected transcript renames the speaker (moderator and correspondent); 6 claims remain
+  Unverified.
+- Found and fixed during the run: concurrent `trafilatura`/lxml extraction aborted the process
+  (libxml2 malloc abort); extraction is now serialized and a judge failure no longer loses the
+  report.
