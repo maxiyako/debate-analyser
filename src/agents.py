@@ -1138,6 +1138,22 @@ def select_top_claims(
     return kept, notes
 
 
+def kickoff_with_retry(make: "Callable[[], tuple[Any, Any]]", label: str, attempts: int = 3):
+    """Build and run a crew, retrying on transient failures (Gemini sometimes returns an
+    empty response that crewai surfaces as ValueError after its own retries).
+    `make` returns (crew, tasks); a fresh crew is built per attempt. Returns (result, tasks)."""
+    last: Exception | None = None
+    for n in range(1, attempts + 1):
+        crew, tasks = make()
+        try:
+            return crew.kickoff(), tasks
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            logger.warning("%s crew failed (attempt %d/%d): %s", label, n, attempts, exc)
+    assert last is not None
+    raise last
+
+
 def retry_empty_extraction(
     first: "ExtractedClaims | None",
     rerun: "Callable[[], ExtractedClaims | None]",
@@ -2009,10 +2025,12 @@ def run_analysis(
     grounded = None
     specialist_checks = None
     if kept_claims:
-        check_crew, b_tasks = build_check_crew(
-            kept_claims, settings, seen_urls, debate_date=debate_date
+        b_result, b_tasks = kickoff_with_retry(
+            lambda: build_check_crew(
+                kept_claims, settings, seen_urls, debate_date=debate_date
+            ),
+            "check",
         )
-        b_result = check_crew.kickoff()
         TRACKER.add_crew("analysis_check", b_result)
         grounded = parse_task_output(b_tasks["grounded"], ClaimCheckList)
         specialist_checks = merge_checklists(
@@ -2020,8 +2038,10 @@ def run_analysis(
         )
 
     # Phase C: critic review of behavioral/moderator sections.
-    critic_crew = build_critic_crew(working, behavioral_raw, moderator_raw, settings)
-    c_result = critic_crew.kickoff()
+    c_result, _ = kickoff_with_retry(
+        lambda: (build_critic_crew(working, behavioral_raw, moderator_raw, settings), None),
+        "critic",
+    )
     TRACKER.add_crew("analysis_critic", c_result)
 
     if isinstance(c_result.pydantic, AnalysisReport):
@@ -2054,15 +2074,17 @@ def run_analysis(
         review_ids = [c.id for c in kept_claims]
         for round_no in range(1, settings.factcheck_manager_rounds + 1):
             round_claims = [claim_by_id[i] for i in review_ids]
-            manager_crew, m_task = build_manager_crew(
-                round_claims,
-                prelim_facts_json(round_claims, facts_by_id),
-                settings,
-                seen_urls,
-                debate_date=debate_date,
-                round_no=round_no,
+            m_result, m_task = kickoff_with_retry(
+                lambda: build_manager_crew(
+                    round_claims,
+                    prelim_facts_json(round_claims, facts_by_id),
+                    settings,
+                    seen_urls,
+                    debate_date=debate_date,
+                    round_no=round_no,
+                ),
+                f"manager r{round_no}",
             )
-            m_result = manager_crew.kickoff()
             TRACKER.add_crew(f"analysis_manager_r{round_no}", m_result)
             reviews = parse_task_output(m_task, ManagerReviewList)
             escalated, m_notes = apply_manager_reviews(

@@ -59,3 +59,30 @@ def test_retry_skipped_when_claims_present_and_survives_errors() -> None:
 
     result, notes = retry_empty_extraction(None, boom, attempts=2)
     assert result is None and len(notes) == 2
+
+
+def test_kickoff_with_retry_rebuilds_and_gives_up() -> None:
+    import pytest
+
+    from src.agents import kickoff_with_retry
+
+    class Crew:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+
+        def kickoff(self):
+            if self.fail:
+                raise ValueError("empty")
+            return "ok"
+
+    built = []
+
+    def make():
+        built.append(1)
+        return Crew(fail=len(built) < 3), {"t": 1}
+
+    assert kickoff_with_retry(make, "x") == ("ok", {"t": 1})
+    assert len(built) == 3
+
+    with pytest.raises(ValueError):
+        kickoff_with_retry(lambda: (Crew(True), None), "x", attempts=2)
