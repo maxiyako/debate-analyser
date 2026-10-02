@@ -1121,18 +1121,9 @@ git commit -m "feat(judge): page-reading evidence judge with injectable LLM and 
   - `report_files(reports_dir: Path) -> list[Path]`
   - `rejudge_reports(reports_dir, dates, *, fetch, llm, only=None) -> dict` with keys `reports`, `skipped_no_date`, `overall`.
 
-- [ ] **Step 1: Seed the dates file**
+- [ ] **Step 1: Dates file (already created by the controller)**
 
-Only two debate dates are recoverable from existing logs (591624 → the log's "referenčného dátumu 12. apríla 2026"; 592879 → `run_batch.sh`). Create `data/debate_dates.json`:
-
-```json
-{
-  "591624": "2026-04-12",
-  "592879": "2026-04-19"
-}
-```
-
-The other nine stored reports (595293, 596580, 599134, 601853, 602993, 604147, 605345, 594102-has-no-report) have no recorded date. **Ask the user for them** at the end of this task; `rejudge` skips and lists reports without a date rather than guessing.
+`data/debate_dates.json` already exists and is committed before this task starts. Dates for 591624, 592879, 594102, 595293, 596580, 597879, 599134, 601853 were recovered from `DEBATE DATE:` lines in the run logs. 602993 (`2026-06-14`), 604147 (`2026-06-21`) and 605345 (`2026-06-28`) are INFERRED from the weekly-Sunday cadence and the `2026-06-14` example in the `ExtractedClaim.time_window` docstring; the user has been asked to confirm them. Do not modify this file in this task.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1393,7 +1384,7 @@ Run: `python3 -m pytest -q`
 Expected: all pass.
 
 ```bash
-git add src/eval.py data/debate_dates.json main.py tests/test_eval.py
+git add src/eval.py main.py tests/test_eval.py
 git commit -m "feat(eval): rejudge harness, persisted debate_date, optional judge pass"
 ```
 
@@ -1404,11 +1395,10 @@ git commit -m "feat(eval): rejudge harness, persisted debate_date, optional judg
 ```
 Expected: a table with one row each for 591624 and 592879, an `OVERALL mean_quality=<number>` line, and `Skipped (no debate date): …` listing the other reports. Record the overall number and the per-verdict means (`mean_quality_by_verdict` in the JSON) — this is the baseline every later step is compared against.
 
-Then **ask the user for the missing debate dates** (595293, 596580, 599134, 601853, 602993, 604147, 605345), add them to `data/debate_dates.json`, and re-run the same command with `--only <id>` for each to fill the baseline, then once without `--only` for the final file.
+If the user later corrects an inferred date in `data/debate_dates.json`, re-run with `--only <id>` for that report.
 
 ```bash
-git add data/debate_dates.json
-git commit -m "chore: record debate dates for stored reports"
+git status --short data/debate_dates.json   # should be clean
 ```
 
 (`data/judge_baseline.json` is left uncommitted on purpose — it lives under `data/`, which is local working data; copy the overall numbers into the commit message or `docs/` if a permanent record is wanted.)

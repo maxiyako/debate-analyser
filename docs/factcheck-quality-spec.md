@@ -379,3 +379,44 @@ replaced.
 - The judge's run-level quality score improves against the step-1 baseline on
   the stored reports.
 - Cost stays at or under roughly 3x the current per-debate spend.
+
+## Results: steps 1–2
+
+Acceptance run on debate 591624 (2026-04-12), stored transcript, judge on.
+
+| | Baseline (old pipeline, re-judged) | New (briefing + consequence selection) |
+|---|---|---|
+| Facts checked | 18 | 27 |
+| Judged (assessable verdicts) | 12 | 21 |
+| Mean evidence quality | 64.6 | 83.3 |
+| Quality: True / Misleading / False | 74.4 / 47.5 / 63.8 | 80.9 / 88.3 / 88.1 |
+| Judge downgrades | 5 | 2 |
+| Run cost (token fees) | n/a | ≈ $5.33 (briefing ≈ 4 calls) |
+
+Overall baseline across 9 stored reports: 182 judged facts, mean quality 73.9, 50 downgrades
+(`data/judge_baseline.json`). The 591624 report scores below that average, so the new run
+(83.3) is above both the same-debate baseline and the overall mean. Single debate, single run:
+treat as a smoke signal, not a benchmark.
+
+Observed against the definition of done:
+- Briefing names the four real guests and the veto, rule-of-law double standard, Hungarian
+  election and Iran disputes; no timeline entry after 2026-04-12; unsourced items were dropped
+  in code (6 notes).
+- Trivia/definitional claims did not take a slot; four consequence-2 claims were reported under
+  "Below consequence threshold".
+- Every named speaker has at least 4 checked facts.
+- Known gaps for later steps: facts still carry `Speaker A` / `Speaker D` labels when the
+  corrected transcript renames the speaker (moderator and correspondent); 6 claims remain
+  Unverified.
+- Found and fixed during the run: concurrent `trafilatura`/lxml extraction aborted the process
+  (libxml2 malloc abort); extraction is now serialized and a judge failure no longer loses the
+  report.
+
+### Second debate: 620752 (2026-09-27, Tomáš vs Viskupič, budget debate)
+
+Full pipeline run (download, ASR, briefing, extraction, check, judge), then re-run from the stored transcript.
+
+- Briefing: 2 participants, 4 disputes (public finances, pro-family measures, transaction tax, fuel prices), 10 sourced timeline events, none after the debate date.
+- Extraction: the crew's extraction task returned `{"claims":[]}` on the first run (zero facts), and again on the first standalone retry; the second standalone retry returned 24 claims. Fix: `retry_empty_extraction` (up to 2 standalone retries without the behavioral context). Root cause of the empty answer is unknown (flaky model behaviour; the same prompt yielded 30 claims standalone).
+- Result: 22 facts (True 8, Unverified 10, Misleading 3, False 1), 1 non-empirical claim excluded. Judge: mean quality 60.5 over 21 judged facts, 9 downgrades to Unverified. Cost ≈ $6.44.
+- Weak spot (input for steps 3–5): downgrades mostly come from sources that were not read (official pages the fetcher could not open), excerpts without the needed numbers, and one source published after the debate date. The per-claim research loop and tiered sources are meant to address exactly this.
