@@ -162,7 +162,12 @@ def test_moderator_cannot_win() -> None:
         SpeakerTactics(speaker="Martin Dubéci", civility={"score": 6}),
         SpeakerTactics(speaker="Andrej Danko", civility={"score": 1}),
     ]
-    verdict = score_report(_report(speakers))
+    transcript = (
+        "Moderátor [00:00]: " + "slovo " * 100 + "\n"
+        "Martin Dubéci [00:10]: " + "slovo " * 600 + "\n"
+        "Andrej Danko [00:20]: " + "slovo " * 600 + "\n"
+    )
+    verdict = score_report(_report(speakers), transcript=transcript)
     names = [r.speaker for r in verdict.scoreboard]
     assert "Moderátor" not in names
     assert verdict.winner == "Martin Dubéci"
@@ -171,7 +176,9 @@ def test_moderator_cannot_win() -> None:
 def test_tied_discipline_has_no_winner() -> None:
     # Both clean: manipulation is 100 for each. Naming one winner was an artifact
     # of max() following overall scoreboard order.
-    verdict = score_report(_report(["A", "B"]))
+    transcript = "A [00:01]: " + "slovo " * 600 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    verdict = score_report(_report(["A", "B"]), transcript=transcript)
+    assert _discipline(_row(verdict, "A"), "manipulation").score == 100.0
     assert "manipulation" not in verdict.discipline_winners
     assert verdict.winner == ""
     assert verdict.margin == 0.0
@@ -319,7 +326,7 @@ def test_responsiveness_per_challenging_question() -> None:
     d = _discipline(row, "responsiveness")
     assert d.inputs == {"challenging": 8, "interrupted": 1, "dodged": 2, "partial": 1}
     assert d.rate == 0.311
-    assert abs(d.score - 68.89) < 0.01
+    assert d.score == 68.9  # 100 * (1 - 0.311), from the published rate
     assert (row.questions_received, row.challenging_questions, row.questions_dodged) == (9, 8, 2)
     assert "2x vyhýbanie sa otázke" in row.badges
     assert len(d.evidence) == 3
@@ -365,3 +372,84 @@ def test_moderator_time_distribution_uses_names_turns_and_start() -> None:
     assert "Záznam" not in dist
     assert dist["Moderátor"].turns == 2
     assert dist["Erik Tomáš"].approximate_share_percent == 90.9
+
+
+def test_no_transcript_suppresses_winner_like_degraded() -> None:
+    speakers = [
+        SpeakerTactics(speaker="A", manipulation=["m"], civility={"score": 9}),
+        SpeakerTactics(speaker="B", civility={"score": 1}),
+    ]
+    verdict = score_report(_report(speakers))
+    assert verdict.scoring_status == "no_transcript"
+    assert verdict.winner == ""
+    assert "manipulation" not in verdict.discipline_winners
+    assert "responsiveness" not in verdict.discipline_winners
+    assert verdict.discipline_winners["civility"] == "A"
+    assert any("could not be counted" in n for n in verdict.method_notes)
+    assert _discipline(_row(verdict, "A"), "manipulation").score is None
+
+
+def test_red_flag_suppressed_when_speaker_map_not_ok() -> None:
+    report = _report([SpeakerTactics(speaker="A", manipulation=["m1", "m2"]), "B"])
+    report.speaker_map = SpeakerMap(status="partial", source="heuristic")
+    transcript = "A [00:01]: " + "slovo " * 600 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    verdict = score_report(report, transcript=transcript)
+    assert verdict.scoring_status == "degraded"
+    assert verdict.red_flag_speaker == ""
+
+
+def test_red_flag_kept_when_degraded_only_by_unmatched_words() -> None:
+    report = _report([SpeakerTactics(speaker="A", manipulation=["m1", "m2"]), "B", "C"])
+    report.speaker_map = SpeakerMap(status="ok", source="cli")
+    transcript = "A [00:01]: " + "slovo " * 600 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    verdict = score_report(report, transcript=transcript)
+    assert verdict.scoring_status == "degraded"
+    assert verdict.red_flag_speaker == "A"
+
+
+def test_published_scores_match_published_rates() -> None:
+    # 8 points / 700 words -> unrounded rate 11.428571...
+    transcript = "A [00:01]: " + "slovo " * 700 + "\n"
+    verdict = score_report(
+        _report([SpeakerTactics(speaker="A", manipulation=["m"])]), transcript=transcript
+    )
+    d = _discipline(_row(verdict, "A"), "manipulation")
+    assert d.rate_per_1000 == 11.43
+    assert d.score == round(100.0 - d.rate_per_1000, 2) == 88.57
+
+    report = _report(["A"])
+    report.question_audit = [_q(1, QuestionOutcome.DODGED), _q(2, QuestionOutcome.ANSWERED)]
+    verdict = score_report(report, transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    r = _discipline(_row(verdict, "A"), "responsiveness")
+    assert r.rate == 0.325
+    assert r.score == round(100.0 * (1.0 - r.rate), 2) == 67.5
+
+
+def test_word_floor_applies_below_500_words_only() -> None:
+    speakers = [SpeakerTactics(speaker="A", manipulation=["m"]), "B"]
+    transcript = "A [00:01]: " + "slovo " * 100 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    verdict = score_report(_report(speakers), transcript=transcript)
+    row = _row(verdict, "A")
+    assert row.words == 100
+    assert _discipline(row, "manipulation").normalization_words == 500
+    assert any("Word floor 500" in n for n in verdict.method_notes)
+
+    transcript = "A [00:01]: " + "slovo " * 501 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    verdict = score_report(_report(speakers), transcript=transcript)
+    assert _discipline(_row(verdict, "A"), "manipulation").normalization_words == 501
+    assert not any("Word floor" in n for n in verdict.method_notes)
+
+
+def test_empty_scoreboard_has_no_winner() -> None:
+    verdict = score_report(_report([]), transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    assert verdict.scoreboard == []
+    assert verdict.winner == ""
+    assert verdict.margin is None
+
+
+def test_dodge_prior_mass_uses_decimal_comma() -> None:
+    report = _report(["A"])
+    report.question_audit = [_q(1, QuestionOutcome.DODGED), _q(2, QuestionOutcome.ANSWERED)]
+    verdict = score_report(report, transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    detail = _discipline(_row(verdict, "A"), "responsiveness").detail
+    assert "+ 0,3)" in detail and "+ 0.3)" not in detail

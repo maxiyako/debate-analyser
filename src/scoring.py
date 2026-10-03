@@ -78,6 +78,7 @@ _MIN_WORDS_FLOOR = 500
 _PARTIAL_WEIGHT = 0.5
 _DODGE_PRIOR_QUESTIONS = 2.0
 _DODGE_PRIOR_MASS = 0.3
+_DODGE_PRIOR_MASS_SK = str(_DODGE_PRIOR_MASS).replace(".", ",")  # decimal comma
 # Normalized by words or questions; not named when speaker identity is uncertain.
 _IDENTITY_SENSITIVE = ("manipulation", "responsiveness")
 _SUBSTANTIVE_TURN_WORDS = 15
@@ -368,13 +369,18 @@ def score_report(
 
     unmatched = [r.speaker for r in speakers.values() if not r.words]
     status: Literal["ok", "degraded", "no_transcript"]
+    names_in_doubt = smap is not None and smap.status != "ok"
     if not transcript:
         status = "no_transcript"
-        method_notes.append("No transcript given: manipulation has no score.")
-    elif unmatched or (smap is not None and smap.status != "ok"):
+        method_notes.append(
+            "No transcript given: fouls and question dodges could not be counted "
+            "per spoken word; no overall winner and no manipulation/responsiveness "
+            "winner is named."
+        )
+    elif unmatched or names_in_doubt:
         status = "degraded"
         why: list[str] = []
-        if smap is not None and smap.status != "ok":
+        if names_in_doubt:
             why.append(f"speaker map status '{smap.status}'")
         if unmatched:
             why.append("no transcript words matched: " + ", ".join(unmatched))
@@ -504,8 +510,9 @@ def score_report(
             norm = max(row.words, _MIN_WORDS_FLOOR)
             if norm != row.words:
                 floored.append(row.speaker)
-            rate_1000: float | None = points / norm * 1000.0
-            manip_score: float | None = max(0.0, 100.0 - rate_1000)
+            # Publish score from the published (rounded) rate so they reconcile.
+            rate_1000: float | None = round(points / norm * 1000.0, 2)
+            manip_score: float | None = max(0.0, round(100.0 - rate_1000, 2))
             manip_detail = (
                 f"manipulácie: {n_manip}, logické chyby: {n_fall} (penalta "
                 f"{points:.0f} b. / {norm} slov × 1000 = {rate_1000:.1f})"
@@ -528,7 +535,7 @@ def score_report(
                 weights={"manipulation": _MANIPULATION_WEIGHT, "fallacies": _FALLACY_WEIGHT},
                 penalty_points=points,
                 normalization_words=norm,
-                rate_per_1000=round(rate_1000, 2) if rate_1000 is not None else None,
+                rate_per_1000=rate_1000,
             )
         )
 
@@ -543,14 +550,14 @@ def score_report(
         n_room = qc["challenging"] - qc["interrupted"]
         if n_room > 0:
             dodge_mass = qc["dodged"] + _PARTIAL_WEIGHT * qc["partial"]
-            dodge_rate: float | None = (dodge_mass + _DODGE_PRIOR_MASS) / (
-                n_room + _DODGE_PRIOR_QUESTIONS
+            dodge_rate: float | None = round(
+                (dodge_mass + _DODGE_PRIOR_MASS) / (n_room + _DODGE_PRIOR_QUESTIONS), 3
             )
-            resp_score: float | None = 100.0 * (1.0 - dodge_rate)
+            resp_score: float | None = round(100.0 * (1.0 - dodge_rate), 2)
             resp_detail = (
                 f"podstatné otázky: {qc['challenging']} (prerušené: "
                 f"{qc['interrupted']}), vyhnutia: {qc['dodged']}, čiastočné: "
-                f"{qc['partial']}; ({dodge_mass:.1f} + {_DODGE_PRIOR_MASS}) / "
+                f"{qc['partial']}; ({dodge_mass:.1f} + {_DODGE_PRIOR_MASS_SK}) / "
                 f"({n_room} + {_DODGE_PRIOR_QUESTIONS:.0f}) = {dodge_rate:.3f}"
             )
         else:
@@ -570,7 +577,7 @@ def score_report(
                     "partial": qc["partial"],
                 },
                 weights={"dodged": 1.0, "partial": _PARTIAL_WEIGHT},
-                rate=round(dodge_rate, 3) if dodge_rate is not None else None,
+                rate=dodge_rate,
             )
         )
 
@@ -637,7 +644,7 @@ def score_report(
     winner = ""
     if len(scoreboard) >= 2:
         margin = round(scoreboard[0].score - scoreboard[1].score, 1)
-    if status == "degraded":
+    if status != "ok":
         pass
     elif len(scoreboard) == 1:
         winner = scoreboard[0].speaker
@@ -653,7 +660,7 @@ def score_report(
 
     discipline_winners: dict[str, str] = {}
     for disc in _DISCIPLINE_WEIGHTS:
-        if status == "degraded" and disc in _IDENTITY_SENSITIVE:
+        if status != "ok" and disc in _IDENTITY_SENSITIVE:
             continue
         rows = [
             (r, d)
@@ -670,7 +677,7 @@ def score_report(
             discipline_winners[disc] = rows[0][0].speaker
 
     red_flag = ""
-    if scoreboard:
+    if scoreboard and not names_in_doubt:
         red = max(
             scoreboard,
             key=lambda r: (r.fabrication_count + r.manipulation_count, -r.score),
