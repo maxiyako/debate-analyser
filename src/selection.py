@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from src.agents import Checkability, ClaimUsage, ExtractedClaim
+from src.agents import Checkability, ClaimUsage, ExtractedClaim, Verdict, VerifiedFact
+from src.report_models import ClaimFunnel
+from src.speakers import canonical_speaker
 from src.validation import normalize
 
 _ROLE_MULT = {
@@ -126,3 +128,60 @@ def select_claims(
 
     out = [c.model_copy(update={"salience": max(1, min(5, c.consequence))}) for c in kept]
     return sorted(out, key=lambda c: c.id), notes
+
+
+_CHECKED = (Verdict.TRUE, Verdict.FALSE, Verdict.MISLEADING)
+
+
+def refresh_funnel_verdicts(
+    funnel: list[ClaimFunnel], facts: list[VerifiedFact], names: list[str]
+) -> None:
+    """Recount verdict buckets; the judge may downgrade after the funnel is built."""
+    rows = {r.speaker: r for r in funnel}
+    for r in funnel:
+        r.checked = r.unverified = r.contested = 0
+    for f in facts:
+        r = rows.get(canonical_speaker(f.speaker, names) or f.speaker)
+        if r is None:
+            continue
+        if f.verdict in _CHECKED:
+            r.checked += 1
+        elif f.verdict == Verdict.UNVERIFIED:
+            r.unverified += 1
+        elif f.verdict == Verdict.CONTESTED:
+            r.contested += 1
+
+
+def build_claim_funnel(
+    extracted: list[ExtractedClaim],
+    kept: list[ExtractedClaim],
+    final_facts: list[VerifiedFact],
+    names: list[str],
+) -> list[ClaimFunnel]:
+    """Per speaker: extracted → non-empirical / dropped / selected → final facts.
+
+    Derived from claim ids only. Merged duplicates count under `dropped_by_selection`.
+    """
+    rows: dict[str, ClaimFunnel] = {}
+
+    def row(speaker: str) -> ClaimFunnel:
+        key = canonical_speaker(speaker, names) or speaker
+        return rows.setdefault(key, ClaimFunnel(speaker=key))
+
+    kept_ids = {c.id for c in kept}
+    for c in extracted:
+        r = row(c.speaker)
+        r.extracted += 1
+        if c.checkability != Checkability.EMPIRICAL:
+            r.non_empirical += 1
+        elif c.id in kept_ids:
+            r.selected_for_check += 1
+        else:
+            r.dropped_by_selection += 1
+    for f in final_facts:
+        row(f.speaker).final_facts += 1
+    for r in rows.values():
+        r.removed_ungrounded = max(0, r.selected_for_check - r.final_facts)
+    funnel = list(rows.values())
+    refresh_funnel_verdicts(funnel, final_facts, names)
+    return funnel
