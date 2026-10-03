@@ -220,9 +220,48 @@ def test_best_window_matches_reference_on_random_and_tied_inputs() -> None:
 
     rng = random.Random(7)
     vocab = ["aa", "ab", "ba", "abc", "cab", "eur", "40", "135", "nie", "ne"]
-    for _ in range(60):
+    for _ in range(300):
         text = " ".join(rng.choice(vocab) for _ in range(rng.randint(1, 40)))
         quote = " ".join(rng.choice(vocab) for _ in range(rng.randint(1, 6)))
         assert best_window(quote, text) == _reference_best_window(quote, text)
     # Identical windows tie: the earliest one wins.
     assert best_window("aa ab", "aa ab x aa ab") == _reference_best_window("aa ab", "aa ab x aa ab")
+
+
+# --- fix round 2 ------------------------------------------------------------
+
+
+def test_negation_flip_ignores_identical_word_and_ne_form() -> None:
+    from src.correction import negation_flip
+
+    assert negation_flip("vie a nevie", "vie a nevie") is False
+    assert negation_flip("vie", "nevie") is True
+    assert negation_flip("nevie", "vie") is True
+    assert negation_flip("to je pravda", "to nie je pravda") is True
+    assert negation_flip("to nikdy nie je", "to nie je") is True
+
+
+def test_verbatim_quotes_with_word_and_ne_form_keep_accusation() -> None:
+    for quote in (
+        "Rastie zamestnanosť a klesa nezamestnanosť v celej krajine",
+        "Minister vie o probléme ale premiér nevie nič o ňom",
+        "Mám dôkazy a nemám žiadny dôvod to skrývať pred vami",
+    ):
+        fact = _fact("Erik Tomáš", quote)
+        notes = _run_on(f"Erik Tomáš [00:12]: {quote}.\n", fact)
+        assert notes == [] and fact.verdict == Verdict.FALSE, quote
+
+
+def test_number_run_must_match_in_order() -> None:
+    line = "Erik Tomáš [00:12]: Dôchodky vzrástli zo 40 na 135 eur za posledné roky.\n"
+    # '135 135' vs window '40 135' -> mismatch
+    bad = _fact("Erik Tomáš", "Dôchodky vzrástli zo 135 na 135 eur")
+    notes = _run_on(line, bad)
+    assert bad.verdict == Verdict.UNVERIFIED and "číslo" in notes[0]
+    # Quote covering only part of the window's numbers is a contiguous sub-run -> OK
+    ok = _fact("Erik Tomáš", "na 135 eur za posledné roky")
+    assert _run_on(line, ok) == []
+    assert ok.verdict == Verdict.FALSE
+    # Quote without numbers is OK
+    none = _fact("Erik Tomáš", "Dôchodky vzrástli zo")
+    assert _run_on(line, none) == []

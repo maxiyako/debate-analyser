@@ -383,6 +383,12 @@ def raw_quote_support(quote: str, raw_text: str) -> tuple[float, str]:
     return min(s for s, _ in scored), " … ".join(w for _, w in scored)
 
 
+def _contains_run(hay: list[str], needle: list[str]) -> bool:
+    """True when `needle` occurs in `hay` as a contiguous in-order run (empty -> True)."""
+    n = len(needle)
+    return n == 0 or any(hay[i : i + n] == needle for i in range(len(hay) - n + 1))
+
+
 def _downgrade(fact: VerifiedFact, why: str, notes: list[str]) -> None:
     notes.append(f'Downgraded {fact.verdict.value}->Unverified ({why}): "{fact.claim[:120]}"')
     fact.verdict = Verdict.UNVERIFIED
@@ -444,7 +450,7 @@ def enforce_accusation_support(
             _downgrade(fact, "citácia sa nezhoduje s pôvodným prepisom", notes)
         elif risky:
             _downgrade(fact, "verdikt závisí od opravy prepisu", notes)
-        elif set(number_tokens(fact.quote)) - set(number_tokens(window)) or (
+        elif not _contains_run(number_tokens(window), number_tokens(fact.quote)) or (
             negation_flip(fact.quote, window)
         ):
             _downgrade(fact, "číslo alebo zápor v citácii chýba v pôvodnom prepise", notes)

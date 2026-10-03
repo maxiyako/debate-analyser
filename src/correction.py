@@ -100,10 +100,19 @@ def negation_tokens(s: str) -> set[str]:
 
 
 def negation_flip(before: str, after: str) -> bool:
+    """True when `after` adds/drops a negation relative to `before`.
+
+    Only words that differ between the two sides count, so a verbatim text that
+    contains both a word and its ne- form (e.g. "vie a nevie") is not a flip.
+    """
     if negation_tokens(before) != negation_tokens(after):
         return True
-    wb, wa = set(_words(before)), set(_words(after))
-    return any("ne" + w in wa for w in wb) or any("ne" + w in wb for w in wa)
+    cb, ca = Counter(_words(before)), Counter(_words(after))
+    differing = set((cb - ca) + (ca - cb))
+    union = set(cb) | set(ca)
+    return any(
+        "ne" + w in union or (w.startswith("ne") and w[2:] in union) for w in differing
+    )
 
 
 def _find_word(text: str, needle: str) -> int:
