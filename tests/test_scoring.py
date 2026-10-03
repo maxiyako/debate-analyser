@@ -10,7 +10,18 @@ from src.agents import (
     Verdict,
     VerifiedFact,
 )
-from src.scoring import score_report, transcript_speaker_stats
+from src.report_models import (
+    ClaimFunnel,
+    QuestionItem,
+    QuestionKind,
+    QuestionOutcome,
+    SpeakerMap,
+)
+from src.scoring import (
+    apply_deterministic_moderator_metrics,
+    score_report,
+    transcript_speaker_stats,
+)
 
 
 def _report(
@@ -105,7 +116,15 @@ def test_behavioral_fouls_normalized_per_words() -> None:
 
 def test_surname_only_fact_speaker_still_penalized() -> None:
     fact = _fact("Danko", Verdict.FALSE, Severity.MATERIAL, ["https://nrsr.sk/x"])
-    verdict = score_report(_report(["Andrej Danko", "Jan Novak"], [fact]))
+    # Transcript given so both speakers have manipulation data (no 1000-word
+    # default any more); otherwise the comparison mixes discipline sets.
+    transcript = (
+        "Andrej Danko [00:01]: " + "slovo " * 600 + "\n"
+        "Jan Novak [00:05]: " + "slovo " * 600 + "\n"
+    )
+    verdict = score_report(
+        _report(["Andrej Danko", "Jan Novak"], [fact]), transcript=transcript
+    )
     assert _row(verdict, "Andrej Danko").false_count == 1
     assert _row(verdict, "Andrej Danko").score < _row(verdict, "Jan Novak").score
 
@@ -159,14 +178,15 @@ def test_tied_discipline_has_no_winner() -> None:
 
 
 def test_close_scores_are_not_a_win() -> None:
-    # Civility 6 vs 5 is a 10-point discipline gap but only ~3 final points
-    # (weight 0.20). Under the 5-point margin that is not a debate winner.
+    # Civility 6 vs 5 is a 10-point discipline gap but under 5 final points
+    # once clean manipulation (100 each) is weighed in. Not a debate winner.
+    transcript = "A [00:01]: " + "slovo " * 1000 + "\nB [00:05]: " + "slovo " * 1000 + "\n"
     speakers = [
         SpeakerTactics(speaker="A", civility={"score": 6}),
         SpeakerTactics(speaker="B", civility={"score": 5}),
     ]
-    verdict = score_report(_report(speakers))
-    assert verdict.margin is not None and verdict.margin < 4
+    verdict = score_report(_report(speakers), transcript=transcript)
+    assert verdict.margin is not None and verdict.margin < 5
     assert verdict.winner == ""
 
 
@@ -222,3 +242,126 @@ def test_stats_ignore_markers_and_count_turn_types() -> None:
 def test_stats_skip_lines_before_debate_start() -> None:
     transcript = "A [00:10]: zostrih slová\nA [02:00]: jedna dva tri\n"
     assert transcript_speaker_stats(transcript, debate_start="01:58")["a"].words == 3
+
+
+def test_unmatched_transcript_is_degraded_not_assumed_1000() -> None:
+    transcript = (
+        "Speaker H [02:00]: " + "slovo " * 50 + "\n"
+        "Speaker D [02:10]: " + "slovo " * 50 + "\n"
+    )
+    speakers = [
+        SpeakerTactics(speaker="Erik Tomáš", manipulation=["m"], civility={"score": 9}),
+        SpeakerTactics(speaker="Marián Viskupič", civility={"score": 2}),
+    ]
+    verdict = score_report(_report(speakers), transcript=transcript)
+    assert verdict.scoring_status == "degraded"
+    assert verdict.winner == ""
+    row = _row(verdict, "Erik Tomáš")
+    assert row.words == 0
+    assert _discipline(row, "manipulation").score is None
+    assert "manipulation" not in verdict.discipline_winners
+    assert verdict.discipline_winners["civility"] == "Erik Tomáš"
+    assert not any("1000 words" in n for n in verdict.method_notes)
+
+
+def test_partial_speaker_map_is_degraded() -> None:
+    report = _report(["A", "B"])
+    report.speaker_map = SpeakerMap(status="partial", source="heuristic")
+    transcript = "A [00:01]: " + "slovo " * 600 + "\nB [00:05]: " + "slovo " * 600 + "\n"
+    assert score_report(report, transcript=transcript).scoring_status == "degraded"
+
+
+def test_manipulation_rate_is_reproducible_from_fields() -> None:
+    transcript = "A [00:01]: " + "slovo " * 2000 + "\n"
+    speakers = [SpeakerTactics(speaker="A", manipulation=["m1", "m2"], logical_fallacies=["f"])]
+    verdict = score_report(_report(speakers), transcript=transcript)
+    d = _discipline(_row(verdict, "A"), "manipulation")
+    assert d.inputs == {"manipulation": 2, "fallacies": 1}
+    assert d.weights == {"manipulation": 8.0, "fallacies": 6.0}
+    assert d.penalty_points == 22.0
+    assert d.normalization_words == 2000
+    assert d.rate_per_1000 == 11.0
+    assert d.score == 89.0
+    assert verdict.scoring_status == "ok"
+
+
+def test_word_share_among_guests_and_turns() -> None:
+    transcript = (
+        "Moderátor [00:00]: " + "a " * 100 + "\n"
+        "A [00:10]: " + "b " * 300 + "\n"
+        "B [00:20]: " + "c " * 100 + "\n"
+    )
+    verdict = score_report(_report(["Moderátor", "A", "B"]), transcript=transcript)
+    a = _row(verdict, "A")
+    assert a.words == 300
+    assert a.word_share_percent == 75.0
+    assert a.transcript_share_percent == 60.0
+    assert (a.turns, a.substantive_turns) == (1, 1)
+    assert sum(r.word_share_percent for r in verdict.scoreboard) == 100.0
+
+
+def _q(i: int, outcome, kind=QuestionKind.CHALLENGING) -> QuestionItem:
+    return QuestionItem(id=i, timestamp="01:00", addressee="A", question=f"otázka {i}?",
+                        kind=kind, outcome=outcome, reason="r")
+
+
+def test_responsiveness_per_challenging_question() -> None:
+    report = _report(["A"])
+    report.question_audit = [
+        _q(1, QuestionOutcome.INTERRUPTED),
+        _q(2, QuestionOutcome.DODGED), _q(3, QuestionOutcome.DODGED),
+        _q(4, QuestionOutcome.PARTIAL),
+        *[_q(i, QuestionOutcome.ANSWERED) for i in range(5, 9)],
+        _q(9, None, QuestionKind.OPEN),
+    ]
+    verdict = score_report(report, transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    row = _row(verdict, "A")
+    d = _discipline(row, "responsiveness")
+    assert d.inputs == {"challenging": 8, "interrupted": 1, "dodged": 2, "partial": 1}
+    assert d.rate == 0.311
+    assert abs(d.score - 68.89) < 0.01
+    assert (row.questions_received, row.challenging_questions, row.questions_dodged) == (9, 8, 2)
+    assert "2x vyhýbanie sa otázke" in row.badges
+    assert len(d.evidence) == 3
+
+
+def test_responsiveness_none_without_challenging_questions() -> None:
+    report = _report(["A"])
+    report.question_audit = [_q(1, None, QuestionKind.OPEN)]
+    verdict = score_report(report, transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    assert _discipline(_row(verdict, "A"), "responsiveness").score is None
+
+
+def test_responsiveness_none_when_audit_is_empty() -> None:
+    # Task 8: an empty audit means "no data" (LLM failed), not perfect answers.
+    verdict = score_report(
+        _report(["A"]), transcript="A [00:01]: " + "slovo " * 600 + "\n"
+    )
+    d = _discipline(_row(verdict, "A"), "responsiveness")
+    assert d.score is None and d.rate is None
+
+
+def test_claim_funnel_is_copied_and_refreshed() -> None:
+    report = _report(["A"], [_fact("A", Verdict.TRUE)])
+    report.claim_funnel = [ClaimFunnel(speaker="A", extracted=5, selected_for_check=3, final_facts=1)]
+    verdict = score_report(report, transcript="A [00:01]: " + "slovo " * 600 + "\n")
+    row = _row(verdict, "A")
+    assert (row.claims_extracted, row.claims_selected, row.checked_claims) == (5, 3, 1)
+    assert report.claim_funnel[0].checked == 1
+    assert "z 3 vybraných (extrahovaných 5)" in _discipline(row, "truthfulness").detail
+
+
+def test_moderator_time_distribution_uses_names_turns_and_start() -> None:
+    report = _report(["Erik Tomáš"])
+    report.speaker_map = SpeakerMap(status="ok", source="cli", debate_start="01:00")
+    transcript = (
+        "Záznam [00:10]: " + "x " * 50 + "\n"
+        "Moderátor [01:00]: Otázka?\n"
+        "Erik Tomáš [01:05]: " + "y " * 20 + "\n"
+        "Moderátor [01:30]: Ďalej?\n"
+    )
+    apply_deterministic_moderator_metrics(report, transcript)
+    dist = {t.speaker: t for t in report.moderator_audit.equal_time_distribution}
+    assert "Záznam" not in dist
+    assert dist["Moderátor"].turns == 2
+    assert dist["Erik Tomáš"].approximate_share_percent == 90.9
