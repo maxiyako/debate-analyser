@@ -16,6 +16,8 @@ from src.report_models import (
     QuestionKind,
     QuestionOutcome,
     SpeakerMap,
+    SpeakerMapEntry,
+    SpeakerRole,
 )
 from src.scoring import (
     apply_deterministic_moderator_metrics,
@@ -171,6 +173,39 @@ def test_moderator_cannot_win() -> None:
     names = [r.speaker for r in verdict.scoreboard]
     assert "Moderátor" not in names
     assert verdict.winner == "Martin Dubéci"
+
+
+def test_named_moderator_from_the_map_is_not_a_contestant() -> None:
+    # The regex only knows the default label 'Moderátor'; with --moderator the
+    # real name must still be excluded, or the moderator can win the debate.
+    report = _report(
+        [
+            SpeakerTactics(speaker="Zuzana Kovačič Hanzelová", civility={"score": 10}),
+            SpeakerTactics(speaker="Erik Tomáš", civility={"score": 6}),
+            SpeakerTactics(speaker="Marián Viskupič", civility={"score": 5}),
+        ]
+    )
+    report.speaker_map = SpeakerMap(
+        status="ok",
+        source="cli",
+        entries=[
+            SpeakerMapEntry(
+                label="A", name="Zuzana Kovačič Hanzelová", role=SpeakerRole.MODERATOR
+            ),
+            SpeakerMapEntry(label="H", name="Erik Tomáš", role=SpeakerRole.GUEST),
+            SpeakerMapEntry(label="D", name="Marián Viskupič", role=SpeakerRole.GUEST),
+        ],
+    )
+    transcript = (
+        "Zuzana Kovačič Hanzelová [00:00]: " + "slovo " * 900 + "\n"
+        "Erik Tomáš [00:10]: " + "slovo " * 600 + "\n"
+        "Marián Viskupič [00:20]: " + "slovo " * 400 + "\n"
+    )
+    verdict = score_report(report, transcript=transcript)
+    assert "Zuzana Kovačič Hanzelová" not in [r.speaker for r in verdict.scoreboard]
+    assert verdict.winner != "Zuzana Kovačič Hanzelová"
+    assert _row(verdict, "Erik Tomáš").word_share_percent == 60.0
+    assert sum(r.word_share_percent for r in verdict.scoreboard) == 100.0
 
 
 def test_tied_discipline_has_no_winner() -> None:

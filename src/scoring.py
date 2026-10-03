@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from src.agents import AnalysisReport, Severity, TimeShare, Verdict
 from src.questions import question_counts, render_dodges
-from src.report_models import QuestionItem
+from src.report_models import QuestionItem, SpeakerMap, SpeakerRole
 from src.selection import refresh_funnel_verdicts
 from src.speakers import canonical_speaker
 from src.transcript_lines import parse_lines, strip_markers, ts_seconds
@@ -154,6 +154,20 @@ class DebateVerdict(BaseModel):
 def is_non_contestant(name: str) -> bool:
     """Moderator, video insert, and recap labels are not debate contestants."""
     return bool(_NON_CONTESTANT.search(name or ""))
+
+
+def map_non_contestants(smap: SpeakerMap | None) -> list[str]:
+    """Names the speaker map knows are not contestants.
+
+    The regex above only catches generic labels; a moderator given by
+    `--moderator` is an ordinary person name and would otherwise be scored,
+    win the debate, and dilute the guests' word share.
+    """
+    out: list[str] = []
+    for entry in smap.entries if smap else []:
+        if entry.role != SpeakerRole.GUEST and entry.name and entry.name not in out:
+            out.append(entry.name)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +339,13 @@ def score_report(
     """
     method_notes: list[str] = []
     speakers: dict[str, SpeakerScore] = {}
+    smap = report.speaker_map
+    off_board = map_non_contestants(smap)
+
+    def non_contestant(name: str) -> bool:
+        return is_non_contestant(name) or (
+            bool(off_board) and canonical_speaker(name, off_board) is not None
+        )
 
     def ensure(name: str) -> SpeakerScore:
         key = _speaker_key(name)
@@ -336,7 +357,7 @@ def score_report(
 
     skipped: list[str] = []
     for s in report.behavioral_analysis.speakers:
-        if is_non_contestant(s.speaker):
+        if non_contestant(s.speaker):
             skipped.append(s.speaker)
             continue
         ensure(s.speaker)
@@ -347,7 +368,6 @@ def score_report(
         )
 
     # --- Raw speaking metrics ------------------------------------------------
-    smap = report.speaker_map
     debate_start = smap.debate_start if smap else None
     stats = transcript_speaker_stats(transcript, debate_start) if transcript else {}
     total_words = sum(st.words for st in stats.values())
@@ -422,7 +442,7 @@ def score_report(
 
     floored: list[str] = []
     for s in report.behavioral_analysis.speakers:
-        if is_non_contestant(s.speaker):
+        if non_contestant(s.speaker):
             continue
         row = ensure(s.speaker)
         row_facts = facts_by_row.get(id(row), [])
