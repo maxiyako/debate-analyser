@@ -86,3 +86,90 @@ def test_split_rejected_for_unknown_speaker_or_line_start() -> None:
     out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
     assert len(out) == 1
     assert [r.rule for r in log] == ["split", "split"]
+
+
+# --- fix round 1 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("trinásť", "štrnásť"),
+        ("dvoch", "troch"),
+        ("dvaja", "traja"),
+        ("tristo", "štyristo"),
+        ("pätnásť", "šestnásť"),
+        ("štyria", "piati"),
+        ("dvadsiatich", "tridsiatich"),
+    ],
+)
+def test_numeral_stems_any_inflection_rejected(before: str, after: str) -> None:
+    line = f"Prišlo {before} ľudí."
+    assert check_edit(e(S, before, after), line, NAMES, SPEAKERS) == "number"
+
+
+@pytest.mark.parametrize(
+    "edit,line",
+    [
+        (e(S, "čí", "či"), "Keď počítame, čí áno."),
+        (e(S, "ministerka", "ministérka"), "Nová ministerka prišla."),
+        (e(S, "dvere", "dvére"), "Zavrel dvere."),
+        (e(S, "trh", "trhu"), "Na trh prišli."),
+        (e(S, "tisícročie", "tisícročia"), "Za tisícročie sa to nezmení."),
+        (e(S, "desiata", "desiatá"), "Bola desiata hodina."),
+    ],
+)
+def test_ordinary_words_near_numeral_stems_still_apply(edit: TranscriptEdit, line: str) -> None:
+    assert check_edit(edit, line, NAMES, SPEAKERS) == ""
+
+
+def test_whole_word_replacement_hits_standalone_word() -> None:
+    lines = parse_lines("Erik Tomáš [00:12]: Keď počítame, čí áno.\n")
+    edits = [TranscriptEdit(line_no=0, type=S, before="čí", after="či")]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert out[0].text == "Keď počítame, či áno."
+    assert log[0].applied
+
+
+def test_before_only_inside_another_word_is_not_found() -> None:
+    assert check_edit(e(S, "čí", "či"), "Keď počítame.", NAMES, SPEAKERS) == "not_found"
+    assert check_edit(e(S, "ľud", "ľuď"), "pre ľudí", NAMES, SPEAKERS) == "not_found"
+
+
+def test_whole_word_punctuation_edge_needle() -> None:
+    lines = parse_lines("Erik Tomáš [00:12]: Ako vidíte vy, pán Tomáš.\n")
+    edits = [TranscriptEdit(line_no=0, type=P, before="vy, pán", after="vy pán")]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert out[0].text == "Ako vidíte vy pán Tomáš."
+
+
+def test_split_anchor_must_be_whole_word() -> None:
+    edit = TranscriptEdit(line_no=0, type=EditType.SPLIT_TURN, before="deň", new_speaker="Erik Tomáš")
+    assert check_edit(edit, "Dobrý večer, deň, vitajte.", NAMES, SPEAKERS) == ""
+    assert check_edit(edit, "Dobrý predeň vitajte.", NAMES, SPEAKERS) == "split"
+
+
+def test_split_works_when_line_numbers_do_not_start_at_zero() -> None:
+    lines = parse_lines(
+        "Moderátor [01:58]: Dobrý deň. Ďakujem za pozvanie.\n"
+        "Erik Tomáš [02:10]: Nech sa páči.\n"
+    )
+    for k, ln in enumerate(lines):
+        ln.no = 100 + k
+    edits = [
+        TranscriptEdit(line_no=0, type=EditType.SPLIT_TURN, before="Ďakujem", new_speaker="Erik Tomáš")
+    ]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert log[0].applied
+    assert [ln.speaker for ln in out] == ["Moderátor", "Erik Tomáš", "Erik Tomáš"]
+    assert out[1].text == "Ďakujem za pozvanie."
+
+
+def test_proper_noun_cannot_swap_allowed_name_for_another() -> None:
+    names = {"Igor Matovič", "Milan Majerský", "Fico"}
+    assert check_edit(e(PN, "Matovič", "Majerský"), "Povedal Matovič.", names, SPEAKERS) == "proper_noun"
+
+
+def test_proper_noun_legit_fix_still_works() -> None:
+    names = {"Robert Fico"}
+    assert check_edit(e(PN, "Fica", "Fico"), "Povedal Fica.", names, SPEAKERS) == ""

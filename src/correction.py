@@ -9,25 +9,41 @@ and turn splits are allowed. Every decision is logged.
 from __future__ import annotations
 
 import difflib
-import logging
 import re
 from dataclasses import replace
 
 from src.report_models import EditResult, EditType, TranscriptEdit
 from src.transcript_lines import Line
 
-logger = logging.getLogger(__name__)
-
 _WORD = re.compile(r"\w+", re.UNICODE)
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
-NUMERAL_WORDS = frozenset({
-    "jeden", "jedna", "jedno", "dva", "dve", "tri", "štyri", "päť", "šesť",
-    "sedem", "osem", "deväť", "desať", "jedenásť", "dvanásť", "dvadsať",
-    "tridsať", "štyridsať", "päťdesiat", "šesťdesiat", "sedemdesiat",
-    "osemdesiat", "deväťdesiat", "sto", "dvesto", "tisíc", "milión",
-    "milióny", "miliónov", "miliarda", "miliardy", "miliárd", "polovica",
-    "tretina", "štvrtina",
-})
+# Cardinal numerals are matched by stem + closed set of inflection endings (fullmatch
+# on a whole word), not by prefix, so "dvere", "trh", "tisícročie" or "desiata" are
+# NOT numerals. Ordinals (piaty, desiaty) are deliberately out of scope.
+_TEENS = "jede|dva|tri|štr|pät|šest|sedem|osem|devät"  # + "násť" (štrnásť, pätnásť, ...)
+_UNITS = "päť|šesť|sedem|osem|deväť"
+NUMERAL_RE = re.compile(
+    r"(?:"
+    r"jed(?:en|n(?:a|o|u|ej|é|ého|ému|om|ým|ou|í|ých|ými))"  # jeden/jedna/jedno/...
+    r"|dv(?:a|e|aja|och|om|oma|omi)"  # dva/dve/dvaja/dvoch/dvom/...
+    r"|tr(?:i|aja|och|om|oma|omi)"  # tri/traja/troch/trom/...
+    r"|štyr(?:i|ia|och|om|mi|oma)"  # štyri/štyria/štyroch/štyrom/...
+    r"|päť|piati(?:ch|m|mi)?"
+    r"|šesť|šiesti(?:ch|m|mi)?"
+    r"|sedem|siedm(?:i|ich|im|imi)"
+    r"|osem|[oô]sm(?:i|ich|im|imi)"
+    r"|deväť|devia(?:ti|tich|tim|timi)"
+    r"|desať|desia(?:ti|tich|tim|timi)"
+    rf"|(?:{_TEENS})nás(?:ť|tich|tim|timi|ti)"  # 11-19
+    r"|(?:dva|tri|štyri)ds(?:ať|iati|iatich|iatim|iatimi)"  # 20, 30, 40
+    rf"|(?:{_UNITS})desiat(?:ich|im|imi)?"  # 50-90
+    rf"|(?:(?:dve|tri|štyri|{_UNITS}))?sto(?:ch)?"  # sto, dvesto, tristo, štyristo, ...
+    r"|tisíc(?:e|ov|om|och|mi)?"
+    r"|milión(?:a|y|ov|om|och|mi)?"
+    r"|miliard(?:a|y|u|ou|e|ách|ám|ami)|miliárd(?:y|ov|am|ach|ami)?"
+    r"|polovic(?:a|e|u|ou)|tretin(?:a|y|u|ou)|štvrtin(?:a|y|u|ou)"
+    r")"
+)
 NEGATION_WORDS = frozenset({
     "nie", "nikdy", "nič", "ani", "nikto", "nikde", "nijako",
     "žiaden", "žiadny", "žiadna", "žiadne", "žiadnu", "žiadneho",
@@ -42,7 +58,8 @@ def _words(s: str) -> list[str]:
 
 
 def number_tokens(s: str) -> list[str]:
-    return sorted(_NUM.findall(s or "")) + sorted(w for w in _words(s) if w in NUMERAL_WORDS)
+    """Digit numbers (sorted) followed by numeral words in order of appearance."""
+    return sorted(_NUM.findall(s or "")) + [w for w in _words(s) if NUMERAL_RE.fullmatch(w)]
 
 
 def negation_tokens(s: str) -> set[str]:
@@ -54,6 +71,20 @@ def _negation_flip(before: str, after: str) -> bool:
         return True
     wb, wa = set(_words(before)), set(_words(after))
     return any("ne" + w in wa for w in wb) or any("ne" + w in wb for w in wa)
+
+
+def _find_word(text: str, needle: str) -> int:
+    """Start of `needle` as a whole word/phrase in `text`, else -1.
+
+    Word-boundary checks apply only on sides where the needle edge is a word char,
+    so punctuation-edged needles ("vy,") still match.
+    """
+    if not needle:
+        return -1
+    pre = r"(?<!\w)" if re.match(r"\w", needle[0]) else ""
+    post = r"(?!\w)" if re.match(r"\w", needle[-1]) else ""
+    m = re.search(pre + re.escape(needle) + post, text)
+    return m.start() if m else -1
 
 
 def _similar(before: str, after: str) -> bool:
@@ -68,11 +99,11 @@ def check_edit(
 ) -> str:
     """'' when the edit is safe to apply, else the name of the guard it breaks."""
     if edit.type == EditType.SPLIT_TURN:
-        pos = line_text.find(edit.before) if edit.before else -1
+        pos = _find_word(line_text, edit.before)
         if edit.new_speaker not in speaker_names or pos <= 0:
             return "split"
         return ""
-    if not edit.before or edit.before not in line_text:
+    if _find_word(line_text, edit.before) < 0:
         return "not_found"
     if edit.before == edit.after:
         return "noop"
@@ -88,6 +119,11 @@ def check_edit(
         return "similarity"
     if edit.type == EditType.PROPER_NOUN:
         allowed = {w for name in allowed_names for w in _words(name)}
+        # Case-sensitive: "HLas" is a misspelling of "HLAS", not itself a correct name.
+        exact = {w for name in allowed_names for w in _WORD.findall(name)}
+        before_exact = _WORD.findall(edit.before)
+        if before_exact and all(w in exact for w in before_exact):
+            return "proper_noun"
         before_words = set(_words(edit.before))
         if any(w not in allowed for w in _words(edit.after) if w not in before_words):
             return "proper_noun"
@@ -116,15 +152,16 @@ def apply_corrections(
             continue
         ln.edit_ids.append(eid)
         if edit.type == EditType.SPLIT_TURN:
-            splits.setdefault(ln.no, []).append(eid)
+            splits.setdefault(edit.line_no, []).append(eid)
         else:
-            ln.text = ln.text.replace(edit.before, edit.after, 1)
+            pos = _find_word(ln.text, edit.before)
+            ln.text = ln.text[:pos] + edit.after + ln.text[pos + len(edit.before) :]
 
     out: list[Line] = []
-    for ln in work:
+    for idx, ln in enumerate(work):
         cuts: list[tuple[int, int]] = []
-        for eid in splits.get(ln.no, []):
-            pos = ln.text.find(log[eid].edit.before)
+        for eid in splits.get(idx, []):
+            pos = _find_word(ln.text, log[eid].edit.before)
             if pos <= 0 or any(p == pos for p, _ in cuts):
                 log[eid] = log[eid].model_copy(update={"applied": False, "rule": "split"})
                 ln.edit_ids.remove(eid)
