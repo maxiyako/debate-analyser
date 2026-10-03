@@ -125,21 +125,22 @@ def _fold(text: str) -> str:
 
 
 def _tokens(name: str) -> list[str]:
-    return [t.casefold() for t in _TOKEN.findall(name or "")]
+    return [_fold(t) for t in _TOKEN.findall(name or "")]
 
 
 def canonical_speaker(name: str, names: list[str]) -> str | None:
     """Resolve an agent-written speaker name to exactly one roster name.
 
-    Exact (case-insensitive) match, then a unique surname match, then a unique
-    5-letter surname stem (Slovak inflection: 'Tomáša' -> 'Tomáš'). 'Speaker X'
-    labels only ever match exactly.
+    Exact match, then a unique surname match, then a unique 5-letter surname
+    stem (Slovak inflection: 'Tomáša' -> 'Tomáš'). All comparisons ignore case
+    and diacritics ('Tomas' is 'Tomáš'); the roster spelling is returned.
+    'Speaker X' labels only ever match exactly.
     """
     if not name:
         return None
-    folded = name.casefold().strip()
+    folded = _fold(name).strip()
     for n in names:
-        if n.casefold() == folded:
+        if _fold(n).strip() == folded:
             return n
     if _SPEAKER_ID.search(name):
         return None
@@ -251,7 +252,7 @@ def build_speaker_prompt(
 
 def _roster_from_intro(names: list[str], lines: list[Line]) -> list[str]:
     """Keep only intro names whose surname stem actually occurs in the opening lines."""
-    head = " ".join(ln.text for ln in lines[:40]).casefold()
+    head = _fold(" ".join(ln.text for ln in lines[:40]))
     out: list[str] = []
     for n in names:
         toks = _tokens(n)

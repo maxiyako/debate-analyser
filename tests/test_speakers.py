@@ -86,10 +86,22 @@ def test_apply_speaker_map_changes_only_labels() -> None:
         ("Novák", None),
         ("Speaker H", None),
         ("", None),
+        # ASR and agents drop diacritics; the roster name is still returned.
+        ("Erik Tomas", "Erik Tomáš"),
+        ("erik tomas", "Erik Tomáš"),
+        ("Tomasa", "Erik Tomáš"),
+        ("Viskupica", "Marián Viskupič"),
     ],
 )
 def test_canonical_speaker(name: str, expected: str | None) -> None:
     assert canonical_speaker(name, GUESTS) == expected
+
+
+def test_canonical_speaker_ambiguous_surname_stays_unresolved() -> None:
+    roster = ["Erik Tomáš", "Peter Tomas"]
+    assert canonical_speaker("Tomáš", roster) is None
+    assert canonical_speaker("Tomasa", roster) is None
+    assert canonical_speaker("Peter Tomáš", roster) == "Peter Tomas"
 
 
 @pytest.mark.skipif(not REAL.exists(), reason="local transcript not available")
