@@ -99,7 +99,7 @@ def negation_tokens(s: str) -> set[str]:
     return {w for w in _words(s) if w in NEGATION_WORDS}
 
 
-def _negation_flip(before: str, after: str) -> bool:
+def negation_flip(before: str, after: str) -> bool:
     if negation_tokens(before) != negation_tokens(after):
         return True
     wb, wa = set(_words(before)), set(_words(after))
@@ -142,7 +142,7 @@ def check_edit(
         return "noop"
     if number_tokens(edit.before) != number_tokens(edit.after):
         return "number"
-    if _negation_flip(edit.before, edit.after):
+    if negation_flip(edit.before, edit.after):
         return "negation"
     if edit.type == EditType.PUNCTUATION:
         return "" if _words(edit.before) == _words(edit.after) else "punctuation"

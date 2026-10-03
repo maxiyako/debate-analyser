@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from typing import Callable
 
 from src.agents import AnalysisReport, Verdict, VerifiedFact
-from src.correction import negation_tokens, number_tokens
+from src.correction import negation_flip, number_tokens
 from src.report_models import EditResult, EditType
 from src.transcript_lines import Line
 
@@ -351,13 +352,28 @@ def best_window(quote: str, text: str) -> tuple[float, str]:
         return 0.0, ""
     n = len(q.split())
     norm = [normalize(t) for t in toks]
-    best = (0.0, "")
+    q_chars = Counter(q)
+    # Upper bound on the ratio of every window (SequenceMatcher.quick_ratio logic,
+    # without building a matcher). Windows are then scored best-bound-first and the
+    # scan stops once no remaining bound can reach the best ratio, so the result
+    # (highest ratio, earliest window on ties) equals scoring every window in order.
+    cands: list[tuple[float, int, str]] = []
     for i in range(max(1, len(toks) - n + 1)):
         cand = " ".join(w for w in norm[i : i + n] if w)
+        c_chars = Counter(cand)
+        shared = sum(min(v, c_chars[c]) for c, v in q_chars.items())
+        cands.append((2.0 * shared / (len(q) + len(cand)), i, cand))
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    best_ratio, best_i = 0.0, -1
+    for bound, i, cand in cands:
+        if bound < best_ratio:
+            break
         ratio = difflib.SequenceMatcher(None, q, cand).ratio()
-        if ratio > best[0]:
-            best = (ratio, " ".join(toks[i : i + n]))
-    return best
+        if ratio > best_ratio or (ratio == best_ratio and ratio > 0 and i < best_i):
+            best_ratio, best_i = ratio, i
+    if best_i < 0:
+        return 0.0, ""
+    return best_ratio, " ".join(toks[best_i : best_i + n])
 
 
 def raw_quote_support(quote: str, raw_text: str) -> tuple[float, str]:
@@ -391,6 +407,11 @@ def enforce_accusation_support(
         fact.timestamp = ""
         fact.transcript_edits = []
         accusation = fact.verdict in _ACCUSATION
+        if len(normalize(fact.quote)) < MIN_QUOTE_LEN:
+            # Too short to attribute to a line; an accusation needs a substantive quote.
+            if accusation:
+                _downgrade(fact, "citácia je príliš krátka na overenie", notes)
+            continue
         reliable = [ln for ln in corrected_lines if ln.speaker == fact.speaker and not ln.crosstalk]
         parts = [p for p in _ELLIPSIS_RE.split(fact.quote or "") if p.strip()] or [fact.quote or ""]
         hits = [ln for ln in reliable if any(quote_grounded(p, ln.text) for p in parts)]
@@ -424,7 +445,7 @@ def enforce_accusation_support(
         elif risky:
             _downgrade(fact, "verdikt závisí od opravy prepisu", notes)
         elif set(number_tokens(fact.quote)) - set(number_tokens(window)) or (
-            negation_tokens(fact.quote) != negation_tokens(window)
+            negation_flip(fact.quote, window)
         ):
             _downgrade(fact, "číslo alebo zápor v citácii chýba v pôvodnom prepise", notes)
     return notes
