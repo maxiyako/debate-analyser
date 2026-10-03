@@ -100,13 +100,19 @@ Viac štítkov smie mapovať na to isté meno (diarizácia rozdelí jedného čl
 1. **Roster** (priorita): CLI `--guests "Erik Tomáš;Marián Viskupič"` a voliteľne
    `--moderator "…"` → inak mená z intra (LLM v kroku 3). Mapovač smie použiť
    iba mená z rostra.
-2. **Štatistiky per štítok** (kód): slová, prehovory, podiel otázok (`?`),
+2. **Štatistiky per štítok** (kód): slová, prehovory, slová na prehovor,
    prvý výskyt.
 3. **Heuristiky (kód)**:
-   - `CLIP`: štítok < 1,5 % slov **alebo** všetky riadky pred `debate_start`.
-   - `MODERATOR`: kandidát s najvyšším podielom otázok medzi štítkami > 10 % slov,
-     ktorý hovorí ako prvý po intre.
-   - `GUEST` kandidáti: zvyšné štítky > 10 % slov.
+   - hlavné štítky: podiel ≥ 10 % slov; pri známom rostri top `len(roster) + 1`
+     štítkov podľa slov (debata s 3 hosťami).
+   - `CLIP`: štítok < 1,5 % slov; ostatné nehlavné štítky `UNKNOWN`
+     (oba sa v prepise volajú `Záznam`).
+   - `MODERATOR`: hlavný štítok s najmenším počtom slov na prehovor.
+     Podiel otázok nefunguje: v 617000 a 605345 sa hostia pýtajú viac než
+     moderátor; slová na prehovor vyšli správne v 5 z 5 prepisov.
+   - `GUEST` kandidáti: ostatné hlavné štítky.
+   - `debate_start`: čas prvého riadku, od ktorého 10 riadkov za sebou patrí
+     iba hlavným štítkom (úvodný zostrih strieda veľa štítkov). 620752 → `01:58`.
 4. **LLM priradenie mien** (jedno malé volanie, nie celý prepis): pre každého
    kandidáta pošli prvých ~8 riadkov, riadky so sebaidentifikáciou
    (`ja ako minister`, `za stranu X`, `my v SaS`) a riadky moderátora tesne pred
@@ -221,10 +227,13 @@ otázky, ktoré naozaj vyžadujú odpoveď. Normalizácia na 1000 slov sa ruší
 
 #### Question audit (nový krok vo fáze A, `src/questions.py`)
 
-1. **Kandidáti (kód).** Každá veta končiaca `?` v prehovore moderátora.
+1. **Kandidáti (kód).** Jeden kandidát na prehovor moderátora, ktorý obsahuje
+   aspoň jednu otázku s ≥ 4 slovami (viac otázok v jednom prehovore je zvyčajne
+   jedna otázka preformulovaná; počítať ich zvlášť by nafúklo menovateľ).
    Adresát = oslovený rečník (`pán/pani X` v tom istom prehovore), inak
-   nasledujúci hosť, ktorý prehovorí. Odpoveď = všetky prehovory adresáta až
-   po ďalšiu otázku moderátora. Každý kandidát má `id`, `timestamp`, text
+   nasledujúci hosť, ktorý prehovorí. Odpoveď = prehovory adresáta (bez
+   `(cez seba)`) až po ďalší prehovor moderátora s otázkou ≥ 4 slová
+   (krátke „Áno?“ odpoveď neukončí). Každý kandidát má `id`, `timestamp`, text
    otázky, adresáta a `answer_span` (riadky odpovede).
    Otázky medzi hosťami sa nepočítajú: v debate sú prevažne rečnícke a
    nikto od oponenta odpoveď nevyžaduje.
@@ -325,11 +334,13 @@ a `selected_for_check = removed_ungrounded + final_facts`.
 
 ### Kde sa počíta
 
-- `run_analysis`: po extrakcii a `select_claims` / `select_top_claims` zostav
-  počty per kanonický rečník; `validate_facts` vráti aj zoznam odstránených
-  faktov (nielen poznámky). Výsledok `report.claim_funnel: list[ClaimFunnel]`.
-- `select_claims` a `select_top_claims` vrátia okrem `kept` aj štruktúrované
-  `excluded` a `dropped` zoznamy (dnes len text).
+- `run_analysis`: po `validate_report` zavolá
+  `build_claim_funnel(extracted, kept, final_facts, guests)` (`src/selection.py`).
+  Počty sa odvodia z `id` tvrdení: neempirické podľa `checkability`, vybrané =
+  `kept`, zvyšok = vyradené výberom (vrátane zlúčených duplikátov),
+  `removed_ungrounded = selected_for_check - final_facts`. Signatúry
+  `select_claims` a `validate_facts` sa nemenia.
+  Výsledok `report.claim_funnel: list[ClaimFunnel]`.
 - `score_report`: doplní `checked/unverified/contested` z finálnych faktov
   (po judge) a skopíruje do `SpeakerScore`:
   `claims_extracted`, `claims_selected`, `claims_checked` (= `checked_claims`).
@@ -355,9 +366,9 @@ class EditType(str, Enum):
 class TranscriptEdit(BaseModel):
     line_no: int
     type: EditType
-    before: str                  # presný úsek z raw riadku
-    after: str
-    split_at_word: int | None = None
+    before: str                  # presný úsek z raw riadku; pri split_turn prvé
+                                 # slová druhého rečníka (kotva rezu)
+    after: str = ""
     new_speaker: str | None = None
     reason: str = ""
 ```
@@ -381,8 +392,9 @@ class TranscriptEdit(BaseModel):
    `SPELLING`/`WORD_BOUNDARY` (zachytí „Armádsky“ → „Pán Majerský“).
 5. Počet slov: rozdiel > 1 pre `SPELLING`/`WORD_BOUNDARY`/`PROPER_NOUN`.
 6. `PROPER_NOUN.after` nie je z rostra, briefingu alebo glosára strán/inštitúcií.
-7. `SPLIT_TURN`: spojenie častí sa nerovná pôvodnému textu, alebo
-   `new_speaker` nie je v `SpeakerMap`.
+7. `SPLIT_TURN`: kotva `before` sa v riadku nenájde alebo je na jeho začiatku,
+   alebo `new_speaker` nie je v `SpeakerMap`. Riadok sa reže na pozíciách kotiev
+   (aj viackrát: moderátor → hosť → moderátor), text sa nemení.
 
 Výstup: `corrected.txt`, `{ep}.corrections.json` (aplikované aj zamietnuté
 s dôvodom) a alignment `corrected_line_no → raw_line_no`.
@@ -392,12 +404,12 @@ s dôvodom) a alignment `corrected_line_no → raw_line_no`.
 
 Nové v `src/validation.py`:
 
-- `quote_attributed(quote, speaker, transcript) -> bool`: citácia musí ležať v
-  riadku daného rečníka. Riadky s `(cez seba)` sa pre False/Misleading
-  nepočítajú ako spoľahlivé priradenie.
-- `quote_raw_support(quote, corrected, raw, edits) -> RawSupport`: nájde
-  citáciu v corrected, cez alignment ju premietne do raw a vráti
-  `similarity` a zoznam editov, ktoré úsek zasahujú.
+- `raw_quote_support(quote, raw_text) -> (similarity, window)`: najlepšie
+  zodpovedajúce okno pôvodného ASR textu rovnakej dĺžky ako citácia.
+- `enforce_accusation_support(facts, corrected_lines, raw_lines, log)`: nájde
+  citáciu v riadkoch daného rečníka (bez `(cez seba)`), cez `Line.raw_no`
+  ju premietne do raw, doplní `quote_raw`, `timestamp`, `transcript_edits`
+  a pri False/Misleading uplatní pravidlá nižšie.
 
 Pravidlá pre fakty s verdiktom `False` / `Misleading`:
 
@@ -406,7 +418,7 @@ Pravidlá pre fakty s verdiktom `False` / `Misleading`:
 | citácia nie je priradená danému rečníkovi | → `Unverified`, poznámka „nepotvrdené priradenie rečníka“ |
 | raw similarity < 0,85 (dnes 0,6 pre všetko) | → `Unverified`, „citácia sa nezhoduje s pôvodným prepisom“ |
 | úsek zasahuje edit typu `PROPER_NOUN` alebo `SPLIT_TURN` | → `Unverified`, „verdikt závisí od opravy prepisu“ |
-| číslo alebo negácia v `claim` sa nenachádza v raw úseku | → `Unverified` |
+| číslo alebo zápor z citácie sa nenachádza v raw okne | → `Unverified` |
 
 Pre `True` / `Unverified` / `Contested` ostáva súčasný prah 0,6.
 
@@ -455,7 +467,9 @@ pôvodný ASR text vedľa opraveného.
 | `src/questions.py` | nový: `extract_question_candidates`, `classify_questions` (LLM), `validate_question_audit` |
 | `src/selection.py` | štruktúrované `excluded` / `dropped` |
 | `src/scoring.py` | stats podľa mapy, nové polia, bez `_DEFAULT_WORDS`, gate, štruktúrované disciplíny |
-| `src/validation.py` | `quote_attributed`, `quote_raw_support`, prísnejšie pravidlá pre obvinenia; `validate_facts` vracia odstránené fakty |
+| `src/validation.py` | `raw_quote_support`, `enforce_accusation_support` |
+| `src/transcript_lines.py` | nový: spoločné parsovanie riadkov `Meno [MM:SS]: text`, `Line.raw_no`, `Line.edit_ids` |
+| `src/report_models.py` | nový: modely sekcií reportu (bez importu `src.agents`, kvôli cyklom) |
 | `main.py` | `--guests`, `--moderator`; uloženie `corrections.json`; výpis turns/claims |
 | FB prompt | zobraziť slová/prehovory; pri `degraded` žiadny víťaz |
 
