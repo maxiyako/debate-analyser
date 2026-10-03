@@ -28,6 +28,7 @@ _SPEAKER_ID = re.compile(r"\bspeaker\s+[a-z0-9]+\b", re.IGNORECASE)
 _TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
 _MIN_CONFIDENCE = 0.7
 _MIN_EVIDENCE_CHARS = 15
+_EVIDENCE_MIN_RATIO = 0.85
 _SELF_ID = re.compile(
     r"\b(ja ako|my v|za stranu|naša strana|moja strana|ako minister|ako poslan)",
     re.IGNORECASE,
@@ -253,11 +254,13 @@ def _roster_from_intro(names: list[str], lines: list[Line]) -> list[str]:
 
 def validate_assignment(
     assign: SpeakerAssignment,
-    body: list[Line],
+    lines: list[Line],
     roles: dict[str, SpeakerRole],
     roster: list[str],
     moderator_name: str,
 ) -> tuple[list[SpeakerMapEntry], list[str], bool]:
+    """Validate the LLM assignment; evidence is grounded against the whole transcript
+    (intro greetings included), restricted to the label's own context."""
     from src.validation import normalize, quote_grounded
 
     notes: list[str] = []
@@ -265,10 +268,16 @@ def validate_assignment(
     mod_label = _moderator_label(roles)
     main = set(_main_labels(roles))
     entries: dict[str, SpeakerMapEntry] = {}
+    seen: set[str] = set()
     for a in assign.assignments:
         if a.label not in main:
             notes.append(f"Speaker map: ignored assignment for non-main label {a.label}")
             continue
+        if a.label in seen:
+            notes.append(f"Speaker map: duplicate assignment for {a.label}")
+            ok = False
+            continue
+        seen.add(a.label)
         if a.name == moderator_name:
             role = SpeakerRole.MODERATOR
         elif a.name in roster:
@@ -280,12 +289,14 @@ def validate_assignment(
         if (role == SpeakerRole.MODERATOR) != (a.label == mod_label):
             notes.append(f"Speaker map: LLM role for {a.label} contradicts the turn-taking heuristic")
             ok = False
-        ctx = label_context(body, a.label, None if a.label == mod_label else mod_label)
+        ctx = label_context(lines, a.label, None if a.label == mod_label else mod_label)
         context = "\n".join(ln.text for ln in ctx)
         grounded = []
         for ev in a.evidence:
             text = _TS_PREFIX.sub("", ev)
-            if len(normalize(text)) >= _MIN_EVIDENCE_CHARS and quote_grounded(text, context):
+            if len(normalize(text)) >= _MIN_EVIDENCE_CHARS and quote_grounded(
+                text, context, min_ratio=_EVIDENCE_MIN_RATIO
+            ):
                 grounded.append(ev)
         confidence = a.confidence if grounded else 0.0
         if not grounded:
@@ -355,16 +366,18 @@ def map_speakers(
     source = "cli" if roster else "llm"
 
     if llm is not None:
+        prompt = build_speaker_prompt(lines, body, roles, roster, moderator_name, briefing_text)
         try:
-            assign = llm(build_speaker_prompt(lines, body, roles, roster, moderator_name, briefing_text))
-            if not roster:
-                roster = _roster_from_intro(assign.guests_from_intro, lines)
-            entries, v_notes, ok = validate_assignment(assign, body, roles, roster, moderator_name)
-            notes.extend(v_notes)
+            assign: SpeakerAssignment | None = llm(prompt)
         except Exception as exc:  # noqa: BLE001 - fall back to heuristics, never abort the run
             logger.warning("Speaker mapping LLM failed: %s", exc)
             notes.append(f"Speaker map LLM failed: {exc}"[:300])
-            entries = []
+            assign = None
+        if assign is not None:
+            if not roster:
+                roster = _roster_from_intro(assign.guests_from_intro, lines)
+            entries, v_notes, ok = validate_assignment(assign, lines, roles, roster, moderator_name)
+            notes.extend(v_notes)
     if not entries:
         entries = _heuristic_entries(body, roles, roster, moderator_name)
         source = "heuristic"

@@ -189,6 +189,67 @@ def test_roster_from_intro_when_no_cli_names() -> None:
     assert smap.guests() == ["Erik Tomáš", "Marián Viskupič"]
 
 
+def test_near_miss_fabricated_evidence_is_rejected() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[1].evidence = ["[00:24] Ja ako minister financií"]
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    g1 = next(e for e in smap.entries if e.label == "G1")
+    assert g1.confidence == 0.0
+    assert any("no grounded evidence for G1" in n for n in smap.notes)
+
+
+def test_intro_greeting_evidence_is_grounded() -> None:
+    rows = [
+        "X [00:01]: krátky zostrih z ulice",
+        "M [00:03]: Dobrý večer, mojimi hosťami sú Erik Tomáš a Marián Viskupič.",
+        "G1 [00:05]: Ďakujem za pozvanie, dobrý večer všetkým divákom.",
+        "Y [00:07]: ďalší krátky zostrih",
+    ]
+    raw = "\n".join(rows) + "\n" + synthetic().split("\n", 1)[1]
+
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[1].evidence = ["[00:05] Ďakujem za pozvanie, dobrý večer všetkým divákom."]
+        return a
+
+    smap = map_speakers(raw, guests=GUESTS, llm=fake)
+    assert smap.debate_start == "00:10"
+    g1 = next(e for e in smap.entries if e.label == "G1")
+    assert g1.confidence == 0.9
+    assert not any("no grounded evidence" in n for n in smap.notes)
+
+
+def test_bug_in_validation_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.speakers as speakers
+
+    def broken(*args, **kwargs):
+        raise ValueError("bug in our code")
+
+    monkeypatch.setattr(speakers, "validate_assignment", broken)
+    with pytest.raises(ValueError, match="bug in our code"):
+        map_speakers(synthetic(), guests=GUESTS, llm=_good)
+
+
+def test_duplicate_label_keeps_first_assignment() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments.append(
+            LabelAssignment(
+                label="G1", name="Marián Viskupič", confidence=0.9,
+                evidence=["[00:24] Ja ako minister práce poviem"],
+            )
+        )
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    assert smap.name_for("G1") == "Erik Tomáš"
+    assert "Speaker map: duplicate assignment for G1" in smap.notes
+    assert smap.status == "partial"
+
+
 def test_prompt_lists_only_main_labels() -> None:
     lines = parse_lines(synthetic())
     roles = heuristic_roles(lines)
