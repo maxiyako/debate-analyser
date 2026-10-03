@@ -119,3 +119,98 @@ def test_question_under_four_words_yields_no_candidate() -> None:
         "Erik Tomáš [00:15]: Neviem.\n"
     )
     assert extract_question_candidates(lines, "Moderátor", GUESTS) == []
+
+
+from src.questions import (  # noqa: E402
+    ClassifiedQuestion,
+    QuestionClassification,
+    classify_questions,
+    question_balance_finding,
+    question_counts,
+    render_dodges,
+    run_question_audit,
+)
+from src.report_models import (  # noqa: E402
+    QuestionItem,
+    QuestionKind,
+    QuestionOutcome,
+    SpeakerMap,
+    SpeakerMapEntry,
+    SpeakerRole,
+)
+
+CH, OPEN = QuestionKind.CHALLENGING, QuestionKind.OPEN
+DODGED, ANSWERED, INTERRUPTED = (
+    QuestionOutcome.DODGED,
+    QuestionOutcome.ANSWERED,
+    QuestionOutcome.INTERRUPTED,
+)
+
+
+def _all_dodged(prompt: str) -> QuestionClassification:
+    return QuestionClassification(items=[
+        ClassifiedQuestion(id=1, kind=CH, outcome=DODGED, reason="odbočil",
+                           evidence=["[00:18] Dane nezvýšime, to vám garantujem"]),
+        ClassifiedQuestion(id=2, kind=CH, outcome=DODGED, evidence=["Uvidíme"]),
+        ClassifiedQuestion(id=3, kind=CH, outcome=DODGED,
+                           evidence=["Toto sa v odpovedi nikde nenachádza vôbec"]),
+    ])
+
+
+def test_classification_is_validated_against_the_answer() -> None:
+    items = extract_question_candidates(LINES, "Moderátor", GUESTS)
+    notes = classify_questions(items, llm=_all_dodged)
+    assert [i.outcome for i in items] == [DODGED, INTERRUPTED, ANSWERED]
+    assert items[0].evidence[0].startswith("[00:12] otázka:")
+    assert "garantujem" in items[0].evidence[1]
+    assert len(notes) == 1 and "#3" in notes[0]
+    assert question_counts(items) == {
+        "received": 3, "challenging": 3, "interrupted": 1, "dodged": 1, "partial": 0,
+    }
+    assert render_dodges(items) == [
+        "[00:12] Pán Viskupič, zvýšite dane, áno alebo nie? → dodged: odbočil"
+    ]
+
+
+def test_non_challenging_and_unclassified_are_not_counted() -> None:
+    items = extract_question_candidates(LINES, "Moderátor", GUESTS)
+
+    def fake(prompt: str) -> QuestionClassification:
+        return QuestionClassification(items=[
+            ClassifiedQuestion(id=1, kind=OPEN, outcome=DODGED, evidence=["x"]),
+        ])
+
+    notes = classify_questions(items, llm=fake)
+    assert items[0].kind == OPEN and items[0].outcome is None
+    assert items[1].kind == OPEN and items[2].kind == OPEN
+    assert len(notes) == 2
+    assert question_counts(items)["challenging"] == 0
+
+
+def test_question_balance_finding() -> None:
+    items = [
+        QuestionItem(id=i, timestamp="00:00", addressee="A" if i < 6 else "B", question="q", kind=CH)
+        for i in range(7)
+    ]
+    finding = question_balance_finding(items, ["A", "B"])
+    assert finding is not None and "A: 6" in finding and "B: 1" in finding
+    assert question_balance_finding(items[:2] + items[6:], ["A", "B"]) is None
+
+
+def _smap() -> SpeakerMap:
+    return SpeakerMap(status="ok", entries=[
+        SpeakerMapEntry(label="a", name="Moderátor", role=SpeakerRole.MODERATOR),
+        SpeakerMapEntry(label="b", name="Erik Tomáš", role=SpeakerRole.GUEST),
+        SpeakerMapEntry(label="c", name="Marián Viskupič", role=SpeakerRole.GUEST),
+    ])
+
+
+def test_run_question_audit_and_failure() -> None:
+    items, notes = run_question_audit(LINES, _smap(), llm=_all_dodged)
+    assert len(items) == 3 and len(notes) == 1
+
+    def boom(prompt: str) -> QuestionClassification:
+        raise RuntimeError("vertex down")
+
+    items, notes = run_question_audit(LINES, _smap(), llm=boom)
+    assert items == [] and "failed" in notes[0]
