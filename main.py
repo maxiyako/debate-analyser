@@ -22,6 +22,27 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
+def _split_guests(value: str | None) -> list[str] | None:
+    """Parse the ';'-separated --guests value; no usable name means no roster."""
+    names = [g.strip() for g in (value or "").split(";") if g.strip()]
+    return names or None
+
+
+def _verdict_line(verdict) -> str:
+    """The overall-result line of the scoreboard print."""
+    if verdict.scoring_status != "ok":
+        return (
+            f"  Hodnotenie je degradované (scoring_status={verdict.scoring_status}): "
+            "víťaz sa neurčuje"
+        )
+    if verdict.winner:
+        gap = f" (náskok {verdict.margin:.1f})" if verdict.margin is not None else ""
+        return f"  Celkový víťaz: {verdict.winner}{gap}"
+    if verdict.margin is not None:
+        return f"  Výsledok nerozhodný (náskok lídra {verdict.margin:.1f})"
+    return "  Celkový víťaz: —"
+
+
 @click.command()
 @click.option(
     "--url",
@@ -55,12 +76,23 @@ logger = logging.getLogger("main")
         "for fact-checking so post-debate events are treated as anachronistic."
     ),
 )
+@click.option(
+    "--guests",
+    default=None,
+    help=(
+        'Invited guests, ";"-separated, e.g. "Erik Tomáš;Marián Viskupič". '
+        "Names the diarization labels."
+    ),
+)
+@click.option("--moderator", default=None, help="Moderator name (default: Moderátor).")
 def main(
     url: str,
     skip_agents: bool,
     transcript_path: Path | None,
     episode_id: str | None,
     debate_date,
+    guests: str | None,
+    moderator: str | None,
 ) -> None:
     settings = get_settings()  # ensures dirs + applies credentials
 
@@ -102,7 +134,11 @@ def main(
     debate_day = debate_date.date() if debate_date is not None else None
     try:
         report, corrected = run_analysis(
-            transcript_text, settings=settings, debate_date=debate_day
+            transcript_text,
+            settings=settings,
+            debate_date=debate_day,
+            guests=_split_guests(guests),
+            moderator=moderator,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Agent pipeline failed")
@@ -123,6 +159,24 @@ def main(
     if corrected.notes:
         for note in corrected.notes[:8]:
             click.echo(f"  · {note}")
+
+    corrections_path = settings.transcript_dir / f"{ep_id}.corrections.json"
+    corrections_path.write_text(
+        json.dumps(
+            [r.model_dump(mode="json") for r in corrected.log],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    upload_file(
+        corrections_path,
+        object_name=f"transcripts/{corrections_path.name}",
+        settings=settings,
+    )
+    click.echo(f"Transcript edit log: {corrections_path}")
+    if report.transcript_quality is not None:
+        report.transcript_quality.log_path = f"transcripts/{corrections_path.name}"
 
     logger.info("=== Fair-play scoring + Facebook post ===")
     from src.agents import generate_facebook_post
@@ -161,24 +215,22 @@ def main(
     upload_file(report_path, object_name=f"reports/{report_path.name}", settings=settings)
     click.echo(f"Report written: {report_path}")
     click.echo("Scoreboard:")
+    click.echo(f"  Stav skórovania: {verdict.scoring_status}")
     for row in verdict.scoreboard:
         parts = ", ".join(
             f"{d.label}={d.score:.0f}" if d.score is not None else f"{d.label}=–"
             for d in row.disciplines
         )
         click.echo(
-            f"  {row.speaker}: {row.score:.1f} "
-            f"(podiel slov {row.word_share_percent:.1f}%) [{parts}]"
+            f"  {row.speaker}: {row.score:.1f} (slová {row.words}, podiel slov "
+            f"hostí {row.word_share_percent:.1f}%, prehovory {row.turns}, podstatné "
+            f"otázky {row.challenging_questions}, vyhnutia {row.questions_dodged}, "
+            f"tvrdenia {row.checked_claims}/{row.claims_selected}/"
+            f"{row.claims_extracted}) [{parts}]"
         )
     for disc, name in verdict.discipline_winners.items():
         click.echo(f"  Víťaz disciplíny {disc}: {name}")
-    if verdict.winner:
-        gap = f" (náskok {verdict.margin:.1f})" if verdict.margin is not None else ""
-        click.echo(f"  Celkový víťaz: {verdict.winner}{gap}")
-    elif verdict.margin is not None:
-        click.echo(f"  Výsledok nerozhodný (náskok lídra {verdict.margin:.1f})")
-    else:
-        click.echo("  Celkový víťaz: —")
+    click.echo(_verdict_line(verdict))
     try:
         post = generate_facebook_post(report, verdict, settings=settings)
     except Exception as exc:  # noqa: BLE001

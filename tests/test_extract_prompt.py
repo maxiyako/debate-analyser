@@ -24,13 +24,14 @@ def test_report_briefing_defaults_to_none() -> None:
     assert AnalysisReport().briefing is None
 
 
-def test_publisher_prompt_excludes_briefing() -> None:
+def test_publisher_prompt_excludes_code_made_sections() -> None:
     import inspect
 
     from src.agents import generate_facebook_post
 
     src = inspect.getsource(generate_facebook_post)
-    assert 'exclude={"briefing"}' in src
+    assert 'exclude={"briefing", "speaker_map", "transcript_quality"}' in src
+    assert "scoring_status" in src  # no winner claims when scoring is degraded
 
 
 def test_retry_empty_extraction_recovers() -> None:
