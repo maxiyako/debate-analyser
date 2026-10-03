@@ -44,32 +44,48 @@ def _addressee(text: str, guests: list[str]) -> str | None:
 def extract_question_candidates(
     lines: list[Line], moderator: str, guests: list[str], start_s: int = 0
 ) -> list[QuestionItem]:
-    """One candidate per moderator turn that contains a real question."""
+    """One candidate per moderator turn (consecutive moderator lines) that
+    contains a real question; the last question of the turn is the one asked."""
     items: list[QuestionItem] = []
-    for i, ln in enumerate(lines):
-        if ln.speaker != moderator or ln.seconds < start_s:
+    i = 0
+    while i < len(lines):
+        if lines[i].speaker != moderator:
+            i += 1
             continue
-        qs = _questions(ln.text)
-        if not qs:
+        end = i
+        while end < len(lines) and lines[end].speaker == moderator:
+            end += 1
+        turn = lines[i:end]
+        i = end
+        asked = [ln for ln in turn if _questions(ln.text)]
+        if not asked or asked[0].seconds < start_s:
             continue
-        addressee = _addressee(ln.text, guests) or next(
-            (nl.speaker for nl in lines[i + 1 :] if nl.speaker in guests), None
+        question = _questions(asked[-1].text)[-1]
+        addressee = next(
+            (a for ln in reversed(turn) if (a := _addressee(ln.text, guests))), None
         )
+        if addressee is None:
+            for nl in lines[end:]:
+                if nl.speaker == moderator and _questions(nl.text):
+                    break
+                if nl.speaker in guests:
+                    addressee = nl.speaker
+                    break
         if addressee is None:
             continue
         answer: list[str] = []
-        for nl in lines[i + 1 :]:
+        for nl in lines[end:]:
             if nl.speaker == moderator and _questions(nl.text):
                 break
-            if nl.speaker == addressee and not nl.crosstalk:
+            if nl.speaker == addressee:
                 answer.append(strip_markers(nl.text))
-        text = " ".join(answer)
+        text = " ".join(a for a in answer if a)
         items.append(
             QuestionItem(
                 id=len(items) + 1,
-                timestamp=ln.ts,
+                timestamp=asked[0].ts,
                 addressee=addressee,
-                question=" ".join(qs)[:600],
+                question=question[:600],
                 answer_words=len(text.split()),
                 answer_text=text,
             )
