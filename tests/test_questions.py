@@ -235,6 +235,26 @@ def test_duplicate_classification_ids_are_ignored() -> None:
     assert items[2].outcome == ANSWERED
 
 
+def test_invalid_enum_value_voids_only_its_own_item() -> None:
+    # One bad string used to void the whole batch: no audit, responsiveness
+    # silently None for everyone.
+    items = extract_question_candidates(LINES, "Moderátor", GUESTS)
+
+    def fake(prompt: str) -> QuestionClassification:
+        return QuestionClassification(items=[
+            ClassifiedQuestion(id=1, kind="challenging", outcome="maybe"),
+            ClassifiedQuestion(id=2, kind="challenging", outcome="dodged"),
+            ClassifiedQuestion(id=3, kind="nonsense", outcome="answered"),
+        ])
+
+    notes = classify_questions(items, llm=fake)
+    assert items[0].kind == OPEN and items[0].outcome is None
+    assert items[1].outcome == INTERRUPTED  # 1-word answer, counted as challenging
+    assert items[2].kind == OPEN and items[2].outcome is None
+    assert question_counts(items)["challenging"] == 1
+    assert [n for n in notes if "#1" in n] and [n for n in notes if "#3" in n]
+
+
 def test_grounded_partial_is_counted_and_rendered() -> None:
     items = extract_question_candidates(LINES, "Moderátor", GUESTS)
 

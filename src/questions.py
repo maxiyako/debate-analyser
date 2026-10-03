@@ -126,15 +126,28 @@ _PROMPT = (
 
 
 class ClassifiedQuestion(BaseModel):
+    """The LLM answer as given: enums are plain strings so one invented value
+    ('maybe') cannot void the whole batch and silence the audit for everyone."""
+
     id: int
-    kind: QuestionKind
-    outcome: QuestionOutcome | None = None
+    kind: str | None = None
+    outcome: str | None = None
     evidence: list[str] = Field(default_factory=list)
     reason: str = ""
 
 
 class QuestionClassification(BaseModel):
     items: list[ClassifiedQuestion] = Field(default_factory=list)
+
+
+def _as_enum(enum_cls, value: str | None):
+    """The enum member for `value`, or None when it is missing or invented."""
+    if value is None or value == "":
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
 
 
 def build_question_prompt(items: list[QuestionItem]) -> str:
@@ -173,14 +186,23 @@ def classify_questions(
             it.kind, it.outcome, it.reason = QuestionKind.OPEN, None, "neklasifikované"
             notes.append(f"Question audit: #{it.id} [{it.timestamp}] not classified; not counted")
             continue
-        it.kind, it.reason = c.kind, c.reason
+        kind = _as_enum(QuestionKind, c.kind)
+        answer = _as_enum(QuestionOutcome, c.outcome)
+        if kind is None or (c.outcome and answer is None):
+            it.kind, it.outcome, it.reason = QuestionKind.OPEN, None, "neklasifikované"
+            notes.append(
+                f"Question audit: #{it.id} [{it.timestamp}] invalid classification "
+                f"(kind={c.kind!r}, outcome={c.outcome!r}); not counted"
+            )
+            continue
+        it.kind, it.reason = kind, c.reason
         if it.kind != QuestionKind.CHALLENGING:
             it.outcome = None
             continue
         if it.answer_words < MIN_ANSWER_WORDS:
             it.outcome = QuestionOutcome.INTERRUPTED
             continue
-        outcome = c.outcome or QuestionOutcome.ANSWERED
+        outcome = answer or QuestionOutcome.ANSWERED
         if outcome in (QuestionOutcome.PARTIAL, QuestionOutcome.DODGED):
             quotes = [_TS_PREFIX.sub("", ev) for ev in c.evidence]
             grounded = [
