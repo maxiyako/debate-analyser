@@ -22,9 +22,21 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
+def _checked_name(name: str, option: str) -> str:
+    """A speaker name the transcript can carry, or a usage error before any work."""
+    from src.speakers import is_valid_speaker_name
+
+    if not is_valid_speaker_name(name):
+        raise click.UsageError(
+            f"Invalid {option} name {name!r}: a speaker name must be 1-60 "
+            "characters and must not contain '[' or ']'."
+        )
+    return name.strip()
+
+
 def _split_guests(value: str | None) -> list[str] | None:
     """Parse the ';'-separated --guests value; no usable name means no roster."""
-    names = [g.strip() for g in (value or "").split(";") if g.strip()]
+    names = [_checked_name(g, "--guests") for g in (value or "").split(";") if g.strip()]
     return names or None
 
 
@@ -94,6 +106,11 @@ def main(
     guests: str | None,
     moderator: str | None,
 ) -> None:
+    # Names first: a name the transcript grammar cannot carry must not cost a
+    # download, an ASR run, and a full agent pipeline before it is noticed.
+    guest_names = _split_guests(guests)
+    moderator_name = _checked_name(moderator, "--moderator") if moderator else None
+
     settings = get_settings()  # ensures dirs + applies credentials
 
     if transcript_path is not None:
@@ -137,8 +154,8 @@ def main(
             transcript_text,
             settings=settings,
             debate_date=debate_day,
-            guests=_split_guests(guests),
-            moderator=moderator,
+            guests=guest_names,
+            moderator=moderator_name,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Agent pipeline failed")

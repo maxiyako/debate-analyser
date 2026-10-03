@@ -127,6 +127,29 @@ def test_split_guests() -> None:
     assert _split_guests(None) is None
 
 
+def test_is_valid_speaker_name_follows_the_transcript_line_grammar() -> None:
+    from src.speakers import is_valid_speaker_name
+
+    assert is_valid_speaker_name("Erik Tomáš")
+    assert not is_valid_speaker_name("")
+    assert not is_valid_speaker_name("Erik [Tomáš]")
+    assert not is_valid_speaker_name("x" * 61)
+    assert is_valid_speaker_name("x" * 60)
+
+
+def test_bad_cli_names_fail_fast_with_a_usage_error() -> None:
+    import click
+
+    main_mod = _main()
+    with pytest.raises(click.UsageError, match="--guests"):
+        main_mod._split_guests("Erik Tomáš; Marián [Viskupič]")
+    with pytest.raises(click.UsageError, match="--moderator"):
+        main_mod._checked_name("x" * 61, "--moderator")
+    assert main_mod._checked_name("Zuzana Kovačič Hanzelová", "--moderator") == (
+        "Zuzana Kovačič Hanzelová"
+    )
+
+
 def test_verdict_line_degraded_names_no_winner() -> None:
     line = _main()._verdict_line(DebateVerdict(scoring_status="degraded", margin=1.2, winner=""))
     assert "degrad" in line

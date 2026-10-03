@@ -104,6 +104,20 @@ def detect_debate_start(lines: list[Line], roles: dict[str, SpeakerRole]) -> str
     return None
 
 
+def is_valid_speaker_name(name: str) -> bool:
+    """True when the name can label a transcript line (LINE_RE speaker group).
+
+    A name that breaks the grammar would make every line it labels unparsable,
+    so word counts, the question audit and the accusation guard would silently
+    see an empty transcript.
+    """
+    clean = (name or "").strip()
+    if not clean or "\n" in clean or "\r" in clean:
+        return False
+    m = LINE_RE.match(f"{clean} [00:00]: text")
+    return m is not None and m.group("speaker").strip() == clean
+
+
 def apply_speaker_map(transcript: str, smap: SpeakerMap) -> str:
     """Replace line labels with mapped names; the spoken text is untouched."""
     out: list[str] = []
