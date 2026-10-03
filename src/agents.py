@@ -15,6 +15,13 @@ from pydantic import BaseModel, Field
 from config import Settings, get_settings
 from src.costs import TRACKER
 from src.briefing import DebateBriefing
+from src.report_models import (
+    ClaimFunnel,
+    EditResult,
+    QuestionItem,
+    SpeakerMap,
+    TranscriptQuality,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,7 @@ class BehavioralAnalysis(BaseModel):
 class TimeShare(BaseModel):
     speaker: str
     approximate_share_percent: float = 0.0
+    turns: int = 0
 
 
 class ModeratorAudit(BaseModel):
@@ -211,6 +219,15 @@ class VerifiedFact(BaseModel):
         ),
     )
     rationale: str = ""
+    quote_raw: str = Field(
+        default="",
+        description="The matching window of the original ASR transcript (before correction).",
+    )
+    timestamp: str = ""
+    transcript_edits: list[int] = Field(
+        default_factory=list,
+        description="Ids of applied transcript edits on the quoted line(s).",
+    )
 
 
 class AnalysisReport(BaseModel):
@@ -223,6 +240,10 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Phase 0 political briefing (background only, never evidence).",
     )
+    speaker_map: SpeakerMap | None = None
+    question_audit: list[QuestionItem] = Field(default_factory=list)
+    claim_funnel: list[ClaimFunnel] = Field(default_factory=list)
+    transcript_quality: TranscriptQuality | None = None
 
 
 class ClaimHighlight(BaseModel):
@@ -250,6 +271,10 @@ class CorrectedTranscript(BaseModel):
     notes: list[str] = Field(
         default_factory=list,
         description="Short notes on speaker reassignments and splits performed.",
+    )
+    log: list[EditResult] = Field(
+        default_factory=list,
+        description="Every proposed transcript edit with its guard decision.",
     )
 
 
