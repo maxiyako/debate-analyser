@@ -213,18 +213,19 @@ def apply_corrections(
             out.append(ln)
             continue
         cuts.sort()
-        split_ids = {eid for _, eid in cuts}
-        base_ids = [i for i in ln.edit_ids if i not in split_ids]
+        split_ids = sorted(eid for _, eid in cuts)
+        base_ids = [i for i in ln.edit_ids if i not in set(split_ids)]
         bounds = [0, *(p for p, _ in cuts), len(ln.text)]
         speakers = [ln.speaker, *(log[eid].edit.new_speaker for _, eid in cuts)]
-        own_ids: list[list[int]] = [[], *([eid] for _, eid in cuts)]
+        # Every segment exists because of the cuts, the first one included: a
+        # quote from any of them depends on the split being right.
         for j, speaker in enumerate(speakers):
             out.append(
                 replace(
                     ln,
                     speaker=speaker,
                     text=ln.text[bounds[j] : bounds[j + 1]].strip(),
-                    edit_ids=[*base_ids, *own_ids[j]],
+                    edit_ids=[*base_ids, *split_ids],
                 )
             )
     for i, ln in enumerate(out):

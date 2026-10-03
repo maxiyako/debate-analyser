@@ -73,7 +73,8 @@ def test_split_turn_preserves_text_and_alternates_speakers() -> None:
     assert " ".join(ln.text for ln in out) == lines[0].text
     assert all(ln.raw_no == 0 and ln.ts == "01:58" for ln in out)
     assert [ln.no for ln in out] == [0, 1, 2]
-    assert out[1].edit_ids == [1] and out[0].edit_ids == []
+    # Both cuts shaped every segment, so every segment carries both edit ids.
+    assert [ln.edit_ids for ln in out] == [[0, 1], [0, 1], [0, 1]]
     assert all(r.applied for r in log)
 
 

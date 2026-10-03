@@ -142,6 +142,27 @@ def test_split_turn_dependent_quote_is_downgraded() -> None:
     assert "opravy prepisu" in notes[0]
 
 
+def test_quote_from_the_first_half_of_a_split_line_is_downgraded() -> None:
+    # The cut decides who said the first half just as much as the second.
+    text = (
+        "Erik Tomáš [00:10]: Vláda zobrala každej rodine 858 eur cez konsolidáciu. "
+        "Ja s tým zásadne nesúhlasím a budem hlasovať proti.\n"
+    )
+    edits = [
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="Ja s tým",
+            new_speaker="Marián Viskupič",
+        )
+    ]
+    fact = _fact("Erik Tomáš", "Vláda zobrala každej rodine 858 eur cez konsolidáciu")
+    notes = _run_on(text, fact, edits)
+    assert fact.transcript_edits == [0]
+    assert fact.verdict == Verdict.UNVERIFIED
+    assert "opravy prepisu" in notes[0]
+
+
 def test_number_mismatch_with_raw_window_is_downgraded() -> None:
     text = "Marián Viskupič [00:25]: Vláda zobrala každej rodine cez konsolidáciu verejných financií 858 eur.\n"
     fact = _fact("Marián Viskupič", "Vláda zobrala každej rodine cez konsolidáciu verejných financií 585 eur")
