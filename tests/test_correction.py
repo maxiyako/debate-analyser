@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.correction import apply_corrections, check_edit
+from src.correction import apply_corrections, check_edit, number_tokens
 from src.report_models import EditType, TranscriptEdit
 from src.transcript_lines import parse_lines
 
@@ -173,3 +173,54 @@ def test_proper_noun_cannot_swap_allowed_name_for_another() -> None:
 def test_proper_noun_legit_fix_still_works() -> None:
     names = {"Robert Fico"}
     assert check_edit(e(PN, "Fica", "Fico"), "Povedal Fica.", names, SPEAKERS) == ""
+
+
+# --- fix round 2 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("dvadsaťpäť", "dvadsaťšesť"),
+        ("tridsaťdva", "tridsaťtri"),
+        ("stopäťdesiat", "stošesťdesiat"),
+        ("milióne", "miliónu"),
+        ("milióne", "miliónami"),
+        ("tisícami", "tisíci"),
+        ("tretine", "štvrtine"),
+        ("polovici", "tretine"),
+        ("dvestom", "tristom"),
+        ("stom", "dvestom"),
+        ("štyrnásť", "šestnásť"),
+        ("šesťnásť", "sedemnásť"),
+        ("jedni", "dvaja"),
+        ("jedny", "dve"),
+        ("jedni", "jedny"),
+    ],
+)
+def test_numeralish_layer_rejects_quantity_changes(before: str, after: str) -> None:
+    line = f"Ide o {before} ľudí."
+    assert check_edit(e(S, before, after), line, NAMES, SPEAKERS) == "number"
+
+
+def test_digit_tokens_compared_in_order() -> None:
+    edit = e(S, "zo 40 na 135", "zo 135 na 40")
+    assert check_edit(edit, "Išlo to zo 40 na 135 eur.", NAMES, SPEAKERS) == "number"
+
+
+def test_digit_and_numeral_word_order_matters() -> None:
+    edit = e(S, "40 tri", "tri 40")
+    assert check_edit(edit, "Bolo 40 tri ľudí.", NAMES, SPEAKERS) == "number"
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "dvere", "trh", "trojka", "tretí", "desiata", "stôl", "stopa", "piatok",
+        "polovičný", "trochu", "naštartovať", "nástroj", "prestížny", "rozhodnutie",
+        "vláda", "ministerka", "premiér", "tisícročie", "trinásobok", "počítame",
+        "stojí", "storočie", "dvojka", "tretia", "štvrtok",
+    ],
+)
+def test_ordinary_words_are_not_numeralish(word: str) -> None:
+    assert number_tokens(f"Povedal {word} včera.") == []

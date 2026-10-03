@@ -24,7 +24,7 @@ _TEENS = "jede|dva|tri|štr|pät|šest|sedem|osem|devät"  # + "násť" (štrná
 _UNITS = "päť|šesť|sedem|osem|deväť"
 NUMERAL_RE = re.compile(
     r"(?:"
-    r"jed(?:en|n(?:a|o|u|ej|é|ého|ému|om|ým|ou|í|ých|ými))"  # jeden/jedna/jedno/...
+    r"jed(?:en|n(?:a|o|u|ej|é|ého|ému|om|ým|ou|í|y|i|ých|ými))"  # jeden/jedna/jedno/...
     r"|dv(?:a|e|aja|och|om|oma|omi)"  # dva/dve/dvaja/dvoch/dvom/...
     r"|tr(?:i|aja|och|om|oma|omi)"  # tri/traja/troch/trom/...
     r"|štyr(?:i|ia|och|om|mi|oma)"  # štyri/štyria/štyroch/štyrom/...
@@ -37,12 +37,25 @@ NUMERAL_RE = re.compile(
     rf"|(?:{_TEENS})nás(?:ť|tich|tim|timi|ti)"  # 11-19
     r"|(?:dva|tri|štyri)ds(?:ať|iati|iatich|iatim|iatimi)"  # 20, 30, 40
     rf"|(?:{_UNITS})desiat(?:ich|im|imi)?"  # 50-90
-    rf"|(?:(?:dve|tri|štyri|{_UNITS}))?sto(?:ch)?"  # sto, dvesto, tristo, štyristo, ...
+    rf"|(?:(?:dve|tri|štyri|{_UNITS}))?sto(?:ch|m|ma|mi)?"  # sto, dvesto, tristo, štyristo, ...
     r"|tisíc(?:e|ov|om|och|mi)?"
     r"|milión(?:a|y|ov|om|och|mi)?"
     r"|miliard(?:a|y|u|ou|e|ách|ám|ami)|miliárd(?:y|ov|am|ach|ami)?"
     r"|polovic(?:a|e|u|ou)|tretin(?:a|y|u|ou)|štvrtin(?:a|y|u|ou)"
     r")"
+)
+# Second, looser "numeral-ish" layer: a word containing one of these long stems is
+# treated as a quantity word (catches compounds like "dvadsaťpäť", "stopäťdesiat" and
+# inflections missing from NUMERAL_RE). Over-matching is safe (the edit is merely
+# rejected); every stem is long enough not to occur in ordinary words.
+NUMERALISH_RE = re.compile(
+    r"dvadsa[ťt]|dvadsiat|tridsa[ťt]|tridsiat|štyridsa[ťt]|štyridsiat"
+    r"|päťdesiat|šesťdesiat|sedemdesiat|osemdesiat|deväťdesiat"
+    # teens: stem + "násť"/"nástich"... ("trinásobok", "nástroj" do not match)
+    r"|(?:jede|dva|tri|štr|štyr|pät|päť|šest|šesť|šiest|sedem|osem|devät|deväť)nás(?:ť|ti)"
+    r"|tisíc(?!roč)|milión|miliar|miliár"
+    r"|polovic|tretin|štvrtin|štvrť"
+    r"|dvest|tristo|štyristo|päťsto|šesťsto|sedemsto|osemsto|deväťsto"
 )
 NEGATION_WORDS = frozenset({
     "nie", "nikdy", "nič", "ani", "nikto", "nikde", "nijako",
@@ -58,8 +71,15 @@ def _words(s: str) -> list[str]:
 
 
 def number_tokens(s: str) -> list[str]:
-    """Digit numbers (sorted) followed by numeral words in order of appearance."""
-    return sorted(_NUM.findall(s or "")) + [w for w in _words(s) if NUMERAL_RE.fullmatch(w)]
+    """Digit numbers and numeral(-ish) words, casefolded, in order of appearance."""
+    text = (s or "").casefold()
+    found = [(m.start(), m.group()) for m in _NUM.finditer(text)]
+    found += [
+        (m.start(), m.group())
+        for m in _WORD.finditer(text)
+        if NUMERAL_RE.fullmatch(m.group()) or NUMERALISH_RE.search(m.group())
+    ]
+    return [tok for _, tok in sorted(found)]
 
 
 def negation_tokens(s: str) -> set[str]:
