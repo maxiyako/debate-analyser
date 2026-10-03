@@ -677,9 +677,12 @@ def score_report(
             discipline_winners[disc] = rows[0][0].speaker
 
     red_flag = ""
-    if scoreboard and not names_in_doubt:
+    # With a transcript, a row that matched zero words is an identity that was
+    # never found in the debate: naming it would pin fouls on a guess.
+    candidates = [r for r in scoreboard if r.words] if transcript else scoreboard
+    if candidates and not names_in_doubt:
         red = max(
-            scoreboard,
+            candidates,
             key=lambda r: (r.fabrication_count + r.manipulation_count, -r.score),
         )
         if red.fabrication_count + red.manipulation_count > 0:

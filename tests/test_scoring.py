@@ -407,6 +407,23 @@ def test_red_flag_kept_when_degraded_only_by_unmatched_words() -> None:
     assert verdict.red_flag_speaker == "A"
 
 
+def test_red_flag_not_named_when_no_words_matched() -> None:
+    # 620752: the map was fine but no transcript words matched any row, so the
+    # named speaker was a guess about an identity that matched nothing.
+    report = _report(
+        [SpeakerTactics(speaker="Erik Tomáš", manipulation=["m1", "m2"]), "Marián Viskupič"]
+    )
+    report.speaker_map = SpeakerMap(status="ok", source="cli")
+    transcript = (
+        "Speaker H [02:00]: " + "slovo " * 600 + "\n"
+        "Speaker D [02:10]: " + "slovo " * 600 + "\n"
+    )
+    verdict = score_report(report, transcript=transcript)
+    assert verdict.scoring_status == "degraded"
+    assert all(r.words == 0 for r in verdict.scoreboard)
+    assert verdict.red_flag_speaker == ""
+
+
 def test_published_scores_match_published_rates() -> None:
     # 8 points / 700 words -> unrounded rate 11.428571...
     transcript = "A [00:01]: " + "slovo " * 700 + "\n"
