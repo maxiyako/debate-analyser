@@ -101,3 +101,97 @@ def test_heuristics_on_620752() -> None:
     assert roles["Speaker D"] == SpeakerRole.GUEST
     assert roles["Speaker B"] == SpeakerRole.CLIP
     assert detect_debate_start(lines, roles) == "01:58"
+
+
+from src.speakers import (  # noqa: E402
+    LabelAssignment,
+    SpeakerAssignment,
+    build_speaker_prompt,
+    map_speakers,
+)
+
+
+def _good(prompt: str) -> SpeakerAssignment:
+    return SpeakerAssignment(
+        assignments=[
+            LabelAssignment(
+                label="M", name="Moderátor", confidence=0.95,
+                evidence=["[00:10] Vitajte, v štúdiu sú Erik Tomáš a Marián Viskupič."],
+            ),
+            LabelAssignment(
+                label="G1", name="Erik Tomáš", confidence=0.9,
+                evidence=["[00:24] Ja ako minister práce poviem"],
+            ),
+            LabelAssignment(
+                label="G2", name="Marián Viskupič", confidence=0.9,
+                evidence=["[00:38] My v SaS tvrdíme, že dane rastú"],
+            ),
+        ]
+    )
+
+
+def test_map_speakers_ok() -> None:
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=_good)
+    assert smap.status == "ok"
+    assert smap.source == "cli"
+    assert smap.debate_start == "00:10"
+    assert smap.name_for("G1") == "Erik Tomáš"
+    assert smap.name_for("G2") == "Marián Viskupič"
+    assert smap.name_for("M") == "Moderátor"
+    assert smap.name_for("X") == "Záznam"
+
+
+def test_name_outside_roster_is_partial() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[2].name = "Igor Matovič"
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    assert smap.status == "partial"
+    assert smap.name_for("G2") is None
+    assert any("not in the roster" in n for n in smap.notes)
+
+
+def test_ungrounded_evidence_zeroes_confidence() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[1].evidence = ["[00:24] Som minister financií a dane znížim"]
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    g1 = next(e for e in smap.entries if e.label == "G1")
+    assert g1.confidence == 0.0
+    assert smap.status == "partial"
+
+
+def test_llm_failure_falls_back_to_heuristic() -> None:
+    def boom(prompt: str) -> SpeakerAssignment:
+        raise RuntimeError("vertex down")
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=boom)
+    assert smap.source == "heuristic"
+    assert smap.status == "partial"
+    assert smap.name_for("G1") == "Erik Tomáš"
+    assert smap.name_for("G2") == "Marián Viskupič"
+    assert smap.name_for("M") == "Moderátor"
+
+
+def test_roster_from_intro_when_no_cli_names() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.guests_from_intro = ["Erik Tomáš", "Marián Viskupič", "Robert Fico"]
+        return a
+
+    smap = map_speakers(synthetic(), llm=fake)
+    assert smap.status == "ok"
+    assert smap.source == "llm"
+    assert smap.guests() == ["Erik Tomáš", "Marián Viskupič"]
+
+
+def test_prompt_lists_only_main_labels() -> None:
+    lines = parse_lines(synthetic())
+    roles = heuristic_roles(lines)
+    prompt = build_speaker_prompt(lines, lines, roles, GUESTS, "Moderátor")
+    assert "LABEL G1" in prompt and "LABEL M" in prompt
+    assert "LABEL X" not in prompt
