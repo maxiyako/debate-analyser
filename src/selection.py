@@ -133,15 +133,29 @@ def select_claims(
 _CHECKED = (Verdict.TRUE, Verdict.FALSE, Verdict.MISLEADING)
 
 
+def _resolve_row(speaker: str, rows: dict[str, ClaimFunnel]) -> ClaimFunnel | None:
+    """Match a fact's speaker to an existing funnel row (exact, then canonical)."""
+    if speaker in rows:
+        return rows[speaker]
+    key = canonical_speaker(speaker, list(rows))
+    return rows[key] if key is not None else None
+
+
 def refresh_funnel_verdicts(
     funnel: list[ClaimFunnel], facts: list[VerifiedFact], names: list[str]
 ) -> None:
-    """Recount verdict buckets; the judge may downgrade after the funnel is built."""
+    """Recount verdict buckets; the judge may downgrade after the funnel is built.
+
+    Fact speakers are resolved against the existing funnel rows, so `names` is
+    kept only for API compatibility and is not needed for correctness (a caller
+    may pass a different roster than `build_claim_funnel` used). Facts whose
+    speaker matches no row are ignored.
+    """
     rows = {r.speaker: r for r in funnel}
     for r in funnel:
         r.checked = r.unverified = r.contested = 0
     for f in facts:
-        r = rows.get(canonical_speaker(f.speaker, names) or f.speaker)
+        r = _resolve_row(f.speaker, rows)
         if r is None:
             continue
         if f.verdict in _CHECKED:
@@ -160,17 +174,18 @@ def build_claim_funnel(
 ) -> list[ClaimFunnel]:
     """Per speaker: extracted → non-empirical / dropped / selected → final facts.
 
-    Derived from claim ids only. Merged duplicates count under `dropped_by_selection`.
+    Derived from claim ids only. Merged duplicates and cap-cut claims count under
+    `dropped_by_selection`. Rows exist only for speakers with extracted claims;
+    a fact whose speaker resolves to none of them (empty, unknown, or a speaker
+    without extracted claims) is skipped and never creates a row, so
+    extracted >= selected_for_check >= final_facts always holds.
     """
     rows: dict[str, ClaimFunnel] = {}
 
-    def row(speaker: str) -> ClaimFunnel:
-        key = canonical_speaker(speaker, names) or speaker
-        return rows.setdefault(key, ClaimFunnel(speaker=key))
-
     kept_ids = {c.id for c in kept}
     for c in extracted:
-        r = row(c.speaker)
+        key = canonical_speaker(c.speaker, names) or c.speaker
+        r = rows.setdefault(key, ClaimFunnel(speaker=key))
         r.extracted += 1
         if c.checkability != Checkability.EMPIRICAL:
             r.non_empirical += 1
@@ -179,7 +194,9 @@ def build_claim_funnel(
         else:
             r.dropped_by_selection += 1
     for f in final_facts:
-        row(f.speaker).final_facts += 1
+        r = _resolve_row(f.speaker, rows)
+        if r is not None:
+            r.final_facts += 1
     for r in rows.values():
         r.removed_ungrounded = max(0, r.selected_for_check - r.final_facts)
     funnel = list(rows.values())
