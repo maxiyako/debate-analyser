@@ -291,7 +291,8 @@ def propose_corrections(
 
     Prompts show global indices and the whole `lines` list is later passed to
     `apply_corrections`, so no index translation is needed; edits outside the
-    chunk's own range are dropped.
+    chunk's own range are dropped and counted in a note (they never reach the
+    applied log, so nothing else would show they were proposed).
     """
     edits: list[TranscriptEdit] = []
     notes: list[str] = []
@@ -303,7 +304,14 @@ def propose_corrections(
             logger.warning("Correction chunk %d-%d failed: %s", start, end - 1, exc)
             notes.append(f"Transcript correction chunk #{start}-#{end - 1} failed: {exc}"[:300])
             continue
-        edits.extend(x for x in batch.edits if start <= x.line_no < end)
+        in_chunk = [x for x in batch.edits if start <= x.line_no < end]
+        outside = len(batch.edits) - len(in_chunk)
+        if outside:
+            notes.append(
+                f"Correction chunk #{start}-#{end - 1}: {outside} edit(s) "
+                "outside the chunk ignored"
+            )
+        edits.extend(in_chunk)
     return edits, notes
 
 

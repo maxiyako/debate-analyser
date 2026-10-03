@@ -289,7 +289,11 @@ def test_propose_chunks_and_drops_out_of_range_edits() -> None:
     assert [x.line_no for x in edits] == [0, 40, 80]
     assert "Edit only lines #40..#79" in prompts[1]
     assert "#35 Moderátor" in prompts[1]  # 5 context lines before the chunk
-    assert notes == []
+    assert notes == [
+        "Correction chunk #0-#39: 1 edit(s) outside the chunk ignored",
+        "Correction chunk #40-#79: 1 edit(s) outside the chunk ignored",
+        "Correction chunk #80-#84: 1 edit(s) outside the chunk ignored",
+    ]
 
 
 def test_failed_chunk_is_noted_and_skipped() -> None:
