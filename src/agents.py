@@ -2149,13 +2149,17 @@ def run_analysis(
         report.moderator_audit.findings.append(balance)
 
     from src.selection import build_claim_funnel
-    from src.validation import enforce_accusation_support, validate_report
+    from src.validation import enforce_accusation_support, name_words, validate_report
 
     report = validate_report(report, working, allowed_urls=seen_urls)
     # Speakers are already canonical here, which the guard needs: it matches
     # a fact's speaker against the transcript line labels exactly.
     accusation_notes = enforce_accusation_support(
-        report.facts, working_lines, parse_lines(named), outcome.log
+        report.facts,
+        working_lines,
+        parse_lines(named),
+        outcome.log,
+        risky_words=name_words(_allowed_names(smap, briefing)),
     )
     report.critic_notes = [*report.critic_notes, *accusation_notes]
     report.claim_funnel = build_claim_funnel(

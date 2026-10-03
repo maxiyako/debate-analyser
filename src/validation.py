@@ -72,7 +72,6 @@ DEFAULT_MIN_RATIO = 0.6
 URL_CHECK_TIMEOUT = 6.0
 RAW_MIN_SIMILARITY = 0.85
 _ACCUSATION = (Verdict.FALSE, Verdict.MISLEADING)
-_RISKY_EDITS = (EditType.PROPER_NOUN, EditType.SPLIT_TURN)
 
 
 def normalize(text: str) -> str:
@@ -389,6 +388,34 @@ def _contains_run(hay: list[str], needle: list[str]) -> bool:
     return n == 0 or any(hay[i : i + n] == needle for i in range(len(hay) - n + 1))
 
 
+def name_words(names: set[str] | list[str]) -> set[str]:
+    """Casefolded words of every name the transcript corrector was allowed to write."""
+    return {w.casefold() for name in names for w in _WORD_RE.findall(name or "")}
+
+
+def _capitalised(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text or "") if w[:1].isupper()}
+
+
+def _edit_is_risky(result: EditResult, quote_norm: str, risky_words: set[str]) -> bool:
+    """True when the accusation could stand or fall on this applied edit.
+
+    A split decides who said the quote. Any other edit matters only inside the
+    quoted span, and then whenever it touches a name: the declared edit type is
+    the model's own word for it, so a 'spelling' fix of Fico to Fica is judged
+    by what it rewrites, not by its label.
+    """
+    edit = result.edit
+    if edit.type == EditType.SPLIT_TURN:
+        return True
+    if normalize(edit.after) not in quote_norm:
+        return False
+    if edit.type == EditType.PROPER_NOUN:
+        return True
+    words = {w.casefold() for w in _WORD_RE.findall(f"{edit.before} {edit.after}")}
+    return bool(words & risky_words) or _capitalised(edit.before) != _capitalised(edit.after)
+
+
 def _downgrade(fact: VerifiedFact, why: str, notes: list[str]) -> None:
     notes.append(f'Downgraded {fact.verdict.value}->Unverified ({why}): "{fact.claim[:120]}"')
     fact.verdict = Verdict.UNVERIFIED
@@ -401,6 +428,7 @@ def enforce_accusation_support(
     corrected_lines: list[Line],
     raw_lines: list[Line],
     log: list[EditResult],
+    risky_words: set[str] | None = None,
 ) -> list[str]:
     """Annotate every fact with its raw ASR window; downgrade False/Misleading
     verdicts whose quote is misattributed, cross-talk only, loosely quoted, or
@@ -440,11 +468,7 @@ def enforce_accusation_support(
         risky = [
             applied[i]
             for i in fact.transcript_edits
-            if applied[i].edit.type in _RISKY_EDITS
-            and (
-                applied[i].edit.type == EditType.SPLIT_TURN
-                or normalize(applied[i].edit.after) in quote_norm
-            )
+            if _edit_is_risky(applied[i], quote_norm, risky_words or set())
         ]
         if similarity < RAW_MIN_SIMILARITY:
             _downgrade(fact, "citácia sa nezhoduje s pôvodným prepisom", notes)

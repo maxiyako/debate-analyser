@@ -102,10 +102,17 @@ def test_llm_invented_code_fields_are_overwritten() -> None:
 SPEAKERS = {"Moderátor", "Erik Tomáš", "Marián Viskupič"}
 
 
-def _run_on(text: str, fact: VerifiedFact, edits: list[TranscriptEdit] | None = None) -> list[str]:
+def _run_on(
+    text: str,
+    fact: VerifiedFact,
+    edits: list[TranscriptEdit] | None = None,
+    risky_words: set[str] | None = None,
+) -> list[str]:
     raw = parse_lines(text)
     corrected, log = apply_corrections(raw, edits or [], set(), SPEAKERS)
-    return enforce_accusation_support([fact], corrected, raw, log)
+    return enforce_accusation_support(
+        [fact], corrected, raw, log, risky_words=risky_words
+    )
 
 
 def test_ne_prefix_negation_added_by_quote_is_downgraded() -> None:
@@ -286,3 +293,34 @@ def test_number_run_must_match_in_order() -> None:
     # Quote without numbers is OK
     none = _fact("Erik Tomáš", "Dôchodky vzrástli zo")
     assert _run_on(line, none) == []
+
+
+# --- fix round 4 ------------------------------------------------------------
+
+
+def test_spelling_edit_touching_a_known_name_is_risky() -> None:
+    # 'hlas' is both a party and an ordinary word; an edit on it can decide
+    # whether the quote accuses a party or says nothing.
+    text = "Erik Tomáš [00:12]: Zaznel tu hlas o zvýšení daní pre všetkých ľudí.\n"
+    edits = [TranscriptEdit(line_no=0, type=EditType.SPELLING, before="hlas", after="hlase")]
+    fact = _fact("Erik Tomáš", "Zaznel tu hlase o zvýšení daní pre všetkých ľudí")
+    notes = _run_on(text, fact, edits, risky_words={"hlas"})
+    assert fact.verdict == Verdict.UNVERIFIED
+    assert "opravy prepisu" in notes[0]
+
+
+def test_spelling_edit_changing_a_capitalised_word_is_risky() -> None:
+    text = "Erik Tomáš [00:12]: Premiér Fico to povedal pred kamerami celému národu.\n"
+    edits = [TranscriptEdit(line_no=0, type=EditType.SPELLING, before="Fico", after="Fica")]
+    fact = _fact("Erik Tomáš", "Premiér Fica to povedal pred kamerami celému národu")
+    notes = _run_on(text, fact, edits)
+    assert fact.verdict == Verdict.UNVERIFIED
+    assert "opravy prepisu" in notes[0]
+
+
+def test_ordinary_spelling_edit_in_the_quote_keeps_the_verdict() -> None:
+    text = "Erik Tomáš [00:12]: Zvýšili sme výživné pre ľudi v celej krajine.\n"
+    edits = [TranscriptEdit(line_no=0, type=EditType.SPELLING, before="ľudi", after="ľudí")]
+    fact = _fact("Erik Tomáš", "Zvýšili sme výživné pre ľudí v celej krajine")
+    assert _run_on(text, fact, edits, risky_words={"hlas", "fico"}) == []
+    assert fact.verdict == Verdict.FALSE

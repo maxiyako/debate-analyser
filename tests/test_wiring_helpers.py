@@ -57,6 +57,16 @@ def test_allowed_names_never_let_a_content_word_be_rewritten() -> None:
         assert check_edit(edit, line, names, {"Erik Tomáš"}) == "proper_noun"
 
 
+def test_allowed_names_become_the_guard_risky_word_set() -> None:
+    from src.validation import name_words
+
+    smap = SpeakerMap(entries=[SpeakerMapEntry(label="H", name="Erik Tomáš", role=SpeakerRole.GUEST)])
+    briefing = DebateBriefing(participants=[Participant(name="Robert Fico", party="SMER")])
+    assert name_words(_allowed_names(smap, briefing)) == {
+        "erik", "tomáš", "robert", "fico", "smer",
+    }
+
+
 def test_canonicalize_speakers_in_facts_and_behavior() -> None:
     report = AnalysisReport(
         behavioral_analysis=BehavioralAnalysis(speakers=[SpeakerTactics(speaker="Tomáš")]),
