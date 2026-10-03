@@ -21,6 +21,9 @@ import re
 from typing import Callable
 
 from src.agents import AnalysisReport, Verdict, VerifiedFact
+from src.correction import negation_tokens, number_tokens
+from src.report_models import EditResult, EditType
+from src.transcript_lines import Line
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _QUOTE_RE = re.compile(r"[\"'„“”‚‘’«»]([^\"'„“”‚‘’«»]{6,})[\"'„“”‚‘’«»]")
@@ -66,6 +69,9 @@ _UA_HEADERS = {
 MIN_QUOTE_LEN = 8
 DEFAULT_MIN_RATIO = 0.6
 URL_CHECK_TIMEOUT = 6.0
+RAW_MIN_SIMILARITY = 0.85
+_ACCUSATION = (Verdict.FALSE, Verdict.MISLEADING)
+_RISKY_EDITS = (EditType.PROPER_NOUN, EditType.SPLIT_TURN)
 
 
 def normalize(text: str) -> str:
@@ -335,3 +341,90 @@ def validate_report(
     if all_notes:
         report.critic_notes = [*report.critic_notes, *all_notes]
     return report
+
+
+def best_window(quote: str, text: str) -> tuple[float, str]:
+    """Most similar run of words in `text`, as long as the quote (ratio, original words)."""
+    q = normalize(quote)
+    toks = (text or "").split()
+    if not q or not toks:
+        return 0.0, ""
+    n = len(q.split())
+    norm = [normalize(t) for t in toks]
+    best = (0.0, "")
+    for i in range(max(1, len(toks) - n + 1)):
+        cand = " ".join(w for w in norm[i : i + n] if w)
+        ratio = difflib.SequenceMatcher(None, q, cand).ratio()
+        if ratio > best[0]:
+            best = (ratio, " ".join(toks[i : i + n]))
+    return best
+
+
+def raw_quote_support(quote: str, raw_text: str) -> tuple[float, str]:
+    """Similarity of a (possibly ellipsis-joined) quote to the raw ASR text."""
+    parts = [p for p in _ELLIPSIS_RE.split(quote) if len(normalize(p)) >= MIN_QUOTE_LEN]
+    scored = [best_window(p, raw_text) for p in (parts or [quote])]
+    return min(s for s, _ in scored), " … ".join(w for _, w in scored)
+
+
+def _downgrade(fact: VerifiedFact, why: str, notes: list[str]) -> None:
+    notes.append(f'Downgraded {fact.verdict.value}->Unverified ({why}): "{fact.claim[:120]}"')
+    fact.verdict = Verdict.UNVERIFIED
+    fact.severity = None
+    fact.rationale = f"{fact.rationale} [{why}]".strip()
+
+
+def enforce_accusation_support(
+    facts: list[VerifiedFact],
+    corrected_lines: list[Line],
+    raw_lines: list[Line],
+    log: list[EditResult],
+) -> list[str]:
+    """Annotate every fact with its raw ASR window; downgrade False/Misleading
+    verdicts whose quote is misattributed, cross-talk only, loosely quoted, or
+    dependent on a transcript correction."""
+    notes: list[str] = []
+    applied = {r.id: r for r in log if r.applied}
+    for fact in facts:
+        # These fields are code-owned; never trust values the LLM put in its output.
+        fact.quote_raw = ""
+        fact.timestamp = ""
+        fact.transcript_edits = []
+        accusation = fact.verdict in _ACCUSATION
+        reliable = [ln for ln in corrected_lines if ln.speaker == fact.speaker and not ln.crosstalk]
+        parts = [p for p in _ELLIPSIS_RE.split(fact.quote or "") if p.strip()] or [fact.quote or ""]
+        hits = [ln for ln in reliable if any(quote_grounded(p, ln.text) for p in parts)]
+        if not hits or not quote_grounded(fact.quote or "", "\n".join(ln.text for ln in hits)):
+            if accusation:
+                _downgrade(fact, "nepotvrdené priradenie rečníka", notes)
+            continue
+        fact.timestamp = hits[0].ts
+        raw_text = "\n".join(
+            raw_lines[ln.raw_no].text
+            for ln in hits
+            if ln.raw_no is not None and ln.raw_no < len(raw_lines)
+        )
+        similarity, window = raw_quote_support(fact.quote, raw_text)
+        fact.quote_raw = window
+        fact.transcript_edits = sorted({i for ln in hits for i in ln.edit_ids if i in applied})
+        if not accusation:
+            continue
+        quote_norm = normalize(fact.quote)
+        risky = [
+            applied[i]
+            for i in fact.transcript_edits
+            if applied[i].edit.type in _RISKY_EDITS
+            and (
+                applied[i].edit.type == EditType.SPLIT_TURN
+                or normalize(applied[i].edit.after) in quote_norm
+            )
+        ]
+        if similarity < RAW_MIN_SIMILARITY:
+            _downgrade(fact, "citácia sa nezhoduje s pôvodným prepisom", notes)
+        elif risky:
+            _downgrade(fact, "verdikt závisí od opravy prepisu", notes)
+        elif set(number_tokens(fact.quote)) - set(number_tokens(window)) or (
+            negation_tokens(fact.quote) != negation_tokens(window)
+        ):
+            _downgrade(fact, "číslo alebo zápor v citácii chýba v pôvodnom prepise", notes)
+    return notes
