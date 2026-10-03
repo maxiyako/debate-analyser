@@ -202,3 +202,23 @@ def test_evidence_and_details_present_in_disciplines() -> None:
     assert manip.evidence == ["strach: 'citát'"]
     assert "nepravda: 1" in truth.detail
     assert verdict.method_notes
+
+
+def test_stats_ignore_markers_and_count_turn_types() -> None:
+    transcript = (
+        "M [00:00]: Otázka?\n"
+        "A [00:05]: (cez seba) " + "slovo " * 20 + "\n"
+        "M [00:10]: Áno.\n"
+        "A [00:12]: Nie nie nie.\n"
+    )
+    stats = transcript_speaker_stats(transcript)
+    assert stats["a"].words == 23
+    assert stats["a"].turns == 2
+    assert stats["a"].substantive_turns == 1
+    assert stats["a"].interjections == 1
+    assert stats["m"].interjections == 2
+
+
+def test_stats_skip_lines_before_debate_start() -> None:
+    transcript = "A [00:10]: zostrih slová\nA [02:00]: jedna dva tri\n"
+    assert transcript_speaker_stats(transcript, debate_start="01:58")["a"].words == 3

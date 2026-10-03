@@ -17,13 +17,10 @@ import re
 from pydantic import BaseModel, Field
 
 from src.agents import AnalysisReport, Severity, TimeShare, Verdict
+from src.transcript_lines import parse_lines, strip_markers, ts_seconds
 
 _SPEAKER_ID = re.compile(r"\bspeaker\s+([a-z0-9]+)\b", re.IGNORECASE)
 _NAME_TOKEN = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
-# 'Speaker X [MM:SS]: text' or 'Real Name [H:MM:SS]: text'
-_LINE_RE = re.compile(
-    r"^(?P<speaker>[^\[\]]{1,60}?)\s*\[(?:\d{1,3}:)?\d{1,2}:\d{2}\]\s*:\s*(?P<text>.*)$"
-)
 _TERMINAL_PUNCT = (".", "!", "?", "…", '"', "”", "'", "’")
 
 # Discipline weights for the final score (renormalized over available data).
@@ -72,6 +69,8 @@ _DEFAULT_WORDS = 1000  # assumed when no transcript stats are available
 # Floor for per-1000-words normalization: protects against exploding foul
 # rates when a speaker's transcript label mismatches and few words matched.
 _MIN_WORDS_FLOOR = 500
+_SUBSTANTIVE_TURN_WORDS = 15
+_INTERJECTION_WORDS = 5
 _MAX_EVIDENCE = 5
 
 
@@ -131,50 +130,69 @@ class SpeakerStats(BaseModel):
     speaker: str
     words: int = 0
     turns: int = 0
+    substantive_turns: int = 0
+    interjections: int = 0
     interruptions_caused: int = 0
 
 
-def transcript_speaker_stats(transcript: str) -> dict[str, SpeakerStats]:
+def _close_turn(row: SpeakerStats | None, words: int) -> None:
+    if row is None:
+        return
+    if words >= _SUBSTANTIVE_TURN_WORDS:
+        row.substantive_turns += 1
+    elif words < _INTERJECTION_WORDS:
+        row.interjections += 1
+
+
+def transcript_speaker_stats(
+    transcript: str, debate_start: str | None = None
+) -> dict[str, SpeakerStats]:
     """Word/turn counts + interruption proxy per speaker key, from the transcript.
+
+    Lines before `debate_start` (the opening recap) are ignored. Cross-talk
+    markers are not counted as words.
 
     Interruption proxy: speaker B starts a turn while A's previous line did not
     end with terminal punctuation (cut-off mid-sentence). Only counted when the
     transcript is reliably punctuated (most lines end with punctuation),
     otherwise ASR noise would inflate it.
     """
-    stats: dict[str, SpeakerStats] = {}
-    parsed: list[tuple[str, str]] = []
-    for line in transcript.splitlines():
-        m = _LINE_RE.match(line.strip())
-        if not m:
-            continue
-        parsed.append((m.group("speaker").strip(), m.group("text").strip()))
-
-    if not parsed:
+    lines = parse_lines(transcript)
+    if debate_start:
+        start = ts_seconds(debate_start)
+        lines = [ln for ln in lines if ln.seconds >= start]
+    if not lines:
         return {}
+    texts = [strip_markers(ln.text) for ln in lines]
+    punctuated = sum(1 for t in texts if t.endswith(_TERMINAL_PUNCT))
+    punct_reliable = punctuated / len(lines) >= 0.5
 
-    punctuated = sum(1 for _, t in parsed if t.endswith(_TERMINAL_PUNCT))
-    punct_reliable = punctuated / len(parsed) >= 0.5
-
-    prev_speaker: str | None = None
+    stats: dict[str, SpeakerStats] = {}
+    prev_key: str | None = None
     prev_text = ""
-    for speaker, text in parsed:
-        key = _speaker_key(speaker)
-        row = stats.setdefault(key, SpeakerStats(speaker=speaker))
-        if len(speaker) > len(row.speaker):
-            row.speaker = speaker
-        row.words += len(text.split())
-        prev_key = _speaker_key(prev_speaker) if prev_speaker is not None else None
-        if key != prev_key:  # new speaking turn
+    turn_row: SpeakerStats | None = None
+    turn_words = 0
+    for ln, text in zip(lines, texts):
+        key = _speaker_key(ln.speaker)
+        row = stats.setdefault(key, SpeakerStats(speaker=ln.speaker))
+        if len(ln.speaker) > len(row.speaker):
+            row.speaker = ln.speaker
+        words = len(text.split())
+        row.words += words
+        if key != prev_key:
+            _close_turn(turn_row, turn_words)
+            turn_row, turn_words = row, 0
             row.turns += 1
             if (
                 punct_reliable
-                and prev_speaker is not None
+                and prev_key is not None
                 and prev_text
                 and not prev_text.endswith(_TERMINAL_PUNCT)
             ):
                 row.interruptions_caused += 1
-        prev_speaker, prev_text = speaker, text
+        turn_words += words
+        prev_key, prev_text = key, text
+    _close_turn(turn_row, turn_words)
     return stats
 
 
