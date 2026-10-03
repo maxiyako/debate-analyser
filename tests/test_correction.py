@@ -224,3 +224,37 @@ def test_digit_and_numeral_word_order_matters() -> None:
 )
 def test_ordinary_words_are_not_numeralish(word: str) -> None:
     assert number_tokens(f"Povedal {word} včera.") == []
+
+
+# --- fix round 3 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("stopäť", "stošesť"),
+        ("stošesť", "stodeväť"),
+        ("stosedem", "stoosem"),
+        ("stojeden", "stosedem"),
+        ("stodesať", "stopäť"),
+        ("dvestopäť", "dvestošesť"),
+        ("dvoje", "troje"),
+        ("troje", "štvoro"),
+        ("štvoro", "pätoro"),
+        ("dvojica", "trojica"),
+    ],
+)
+def test_sto_compounds_and_collectives_rejected(before: str, after: str) -> None:
+    line = f"Bolo ich {before} naraz."
+    assert check_edit(e(S, before, after), line, NAMES, SPEAKERS) == "number"
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "stolica", "stojan", "stoka", "stonoha", "štvorec", "stojí", "stodola", "stovka",
+        "trojuholník", "dvojka", "trojka", "stopár", "stoličku", "štvorcový", "dvojitý",
+    ],
+)
+def test_more_ordinary_words_are_not_numeralish(word: str) -> None:
+    assert number_tokens(f"Povedal {word} včera.") == []

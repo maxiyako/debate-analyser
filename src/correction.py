@@ -42,6 +42,9 @@ NUMERAL_RE = re.compile(
     r"|milión(?:a|y|ov|om|och|mi)?"
     r"|miliard(?:a|y|u|ou|e|ách|ám|ami)|miliárd(?:y|ov|am|ach|ami)?"
     r"|polovic(?:a|e|u|ou)|tretin(?:a|y|u|ou)|štvrtin(?:a|y|u|ou)"
+    # collectives: dvoje, troje, štvoro, pätoro, ... and dvojica/trojica/štvorica
+    r"|(?:dv|tr)oj(?:e|ich|im|iach)|štvoro|(?:pät|šest|sedm|osm|devät|desat)oro"
+    r"|(?:dvoj|troj|štvor)ic(?:a|e|u|ou|iam|iach|ami)"
     r")"
 )
 # Second, looser "numeral-ish" layer: a word containing one of these long stems is
@@ -55,6 +58,9 @@ NUMERALISH_RE = re.compile(
     r"|(?:jede|dva|tri|štr|štyr|pät|päť|šest|šesť|šiest|sedem|osem|devät|deväť)nás(?:ť|ti)"
     r"|tisíc(?!roč)|milión|miliar|miliár"
     r"|polovic|tretin|štvrtin|štvrť"
+    # 101-109, 110: "sto" + unit ("stopäť", "stojeden"); 2xx-9xx hundreds are caught by
+    # the dvest/tristo/... stems above.
+    r"|\bsto(?:jeden|dva|tri|štyri|päť|šesť|sedem|osem|deväť|desať)"
     r"|dvest|tristo|štyristo|päťsto|šesťsto|sedemsto|osemsto|deväťsto"
 )
 NEGATION_WORDS = frozenset({
