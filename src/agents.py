@@ -1904,7 +1904,7 @@ def run_analysis(
 
     from src.correction import correct_transcript_edits, default_correction_llm
     from src.reconcile import merge_checklists, parse_task_output, reconcile_checks
-    from src.speakers import apply_speaker_map, default_speaker_llm, map_speakers
+    from src.speakers import CLIP_NAME, apply_speaker_map, default_speaker_llm, map_speakers
     from src.transcript_lines import parse_lines
 
     pipeline_notes: list[str] = []
@@ -1959,6 +1959,7 @@ def run_analysis(
         llm=default_correction_llm(settings),
         allowed_names=_allowed_names(smap, briefing),
         speaker_names={e.name for e in smap.entries},
+        tail_owners={smap.moderator() or "Moderátor", CLIP_NAME},
     )
     pipeline_notes.extend(outcome.notes)
     # `outcome.lines` carries edit ids and the raw line each line came from;

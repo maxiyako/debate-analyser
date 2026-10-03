@@ -177,6 +177,7 @@ def apply_corrections(
     edits: list[TranscriptEdit],
     allowed_names: set[str],
     speaker_names: set[str],
+    tail_owners: set[str] | None = None,
 ) -> tuple[list[Line], list[EditResult]]:
     """Apply guarded edits; returns new lines (input untouched) and the full log."""
     work = [replace(ln, edit_ids=list(ln.edit_ids)) for ln in lines]
@@ -214,11 +215,16 @@ def apply_corrections(
             continue
         # Guest line: a foreign new_speaker takes only `before`; the tail
         # reverts to the guest unless another cut already sits at that end.
-        # Moderátor / Záznam keep the old takeover (intro: guest gets the tail).
+        # tail_owners (default Moderátor / Záznam) keep the old takeover
+        # (intro: guest gets the tail).
+        owners = {
+            s.casefold()
+            for s in (tail_owners if tail_owners is not None else {"Moderátor", "Záznam"})
+        }
         points: list[tuple[int, str]] = [
             (pos, log[eid].edit.new_speaker) for pos, eid in cuts
         ]
-        if ln.speaker.casefold() not in {"moderátor", "záznam"}:
+        if ln.speaker.casefold() not in owners:
             occupied = {p for p, _ in points}
             for pos, eid in cuts:
                 edit = log[eid].edit
@@ -265,7 +271,9 @@ _RULES = (
     "- punctuation: commas and sentence ends; words stay identical.\n"
     "- split_turn: one line contains two speakers. `before` = the first words "
     "spoken by the second speaker, copied exactly; `new_speaker` from SPEAKERS. "
-    "Use one split_turn per speaker change.\n"
+    "Use one split_turn per speaker change. On a guest line `before` is the "
+    "entire interruption (not one word plus a neighbour), because code keeps "
+    "only that span for the foreign speaker.\n"
     "Never: fix grammar or style of spoken language, paraphrase, add missing "
     "words, delete repetitions or filler words, change numbers or negation. "
     "If unsure, propose nothing.\n"
@@ -349,12 +357,15 @@ def correct_transcript_edits(
     llm: Callable[[str], CorrectionBatch],
     allowed_names: set[str],
     speaker_names: set[str],
+    tail_owners: set[str] | None = None,
 ) -> CorrectionOutcome:
     lines = parse_lines(named_text)
     edits, notes = propose_corrections(
         lines, llm=llm, allowed_names=allowed_names, speaker_names=speaker_names
     )
-    out, log = apply_corrections(lines, edits, allowed_names, speaker_names)
+    out, log = apply_corrections(
+        lines, edits, allowed_names, speaker_names, tail_owners=tail_owners
+    )
     quality = TranscriptQuality(
         applied=sum(1 for r in log if r.applied),
         rejected_by_rule=dict(Counter(r.rule for r in log if not r.applied)),

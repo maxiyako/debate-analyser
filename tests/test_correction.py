@@ -446,3 +446,38 @@ def test_moderator_line_split_still_gives_guest_the_tail() -> None:
     assert out[0].text == "Vítam Erika Tomáša."
     assert out[1].text == "Ďakujem za pozvanie a všetkým prajem peknú nedeľu."
     assert " ".join(ln.text for ln in out) == lines[0].text
+
+
+def test_named_moderator_intro_split_takes_tail_only_when_in_tail_owners() -> None:
+    lines = parse_lines(
+        "Zuzana Kovačič Hanzelová [01:58]: Vítam Erika. "
+        "Ďakujem za pozvanie a peknú nedeľu.\n"
+    )
+    speakers = {"Zuzana Kovačič Hanzelová", "Erik Tomáš"}
+    edits = [
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="Ďakujem za pozvanie",
+            new_speaker="Erik Tomáš",
+        )
+    ]
+    owned, owned_log = apply_corrections(
+        lines,
+        edits,
+        NAMES,
+        speakers,
+        tail_owners={"Zuzana Kovačič Hanzelová", "Záznam"},
+    )
+    assert owned_log[0].applied
+    assert [ln.speaker for ln in owned] == ["Zuzana Kovačič Hanzelová", "Erik Tomáš"]
+    assert owned[1].text == "Ďakujem za pozvanie a peknú nedeľu."
+
+    clipped, clipped_log = apply_corrections(lines, edits, NAMES, speakers)
+    assert clipped_log[0].applied
+    assert [ln.speaker for ln in clipped] == [
+        "Zuzana Kovačič Hanzelová",
+        "Erik Tomáš",
+        "Zuzana Kovačič Hanzelová",
+    ]
+    assert clipped[1].text == "Ďakujem za pozvanie"
