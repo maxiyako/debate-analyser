@@ -39,7 +39,8 @@ behoch opravená bola, ale bez auditu a s reálnym rizikom zmeny významu.
    krok s dôkazmi a stavom. Nezávisí od opravy textu.
 2. Scoreboard nesie presné surové metriky (slová, podiel, prehovory) a celý
    „lievik“ tvrdení.
-3. Penalizácie sa normalizujú skutočným počtom slov. Žiadne fiktívne 1000.
+3. Manipulácie a fauly sa normalizujú skutočným počtom slov, vyhýbanie sa
+   otázkam počtom podstatných priamych otázok. Žiadne fiktívne 1000.
    Keď dáta chýbajú, skóre disciplíny je `None` a víťaz sa nevyhlási.
 4. Oprava prepisu je auditovateľný zoznam drobných úprav; obvinenie
    (False/Misleading) nikdy nesmie stáť na slove, ktoré zmenil korektor.
@@ -59,7 +60,7 @@ raw.txt (Speaker A..K)                        ← nemenné, zdroj pravdy
   ├─ 3. propose_corrections() → edits[] po chunkoch (LLM)        [nový src/correction.py]
   ├─ 4. apply_corrections()   → corrected.txt + corrections.json (guardy v kóde)
   │
-  ├─ analýza (briefing, extract, check, critic) nad corrected.txt
+  ├─ analýza (briefing, extract, question audit, check, critic) nad corrected.txt
   ├─ validate_report(corrected, raw, alignment, speaker_map)
   └─ score_report(report, corrected, speaker_map, claim_funnel)
 ```
@@ -155,8 +156,8 @@ a všetkým prajem peknú nedeľu.“ (Tomáš). Rieši to krok 3 ako edit typu
   - `substantive_turns` — prehovory s ≥ 15 slovami (bez krátkych vstupov
     „Ďakujem.“, „Áno.“),
   - `interjections` — prehovory s < 5 slovami,
-  - `questions_received` — počet moderátorových prehovorov končiacich `?`
-    bezprostredne pred prehovorom tohto rečníka,
+  - `questions_received` — počet otázok moderátora adresovaných tomuto
+    rečníkovi (kandidáti z kroku „Question audit“, všetky druhy),
   - `interruptions_caused` (už existuje).
 
 ### Nové polia `SpeakerScore`
@@ -169,6 +170,9 @@ turns: int
 substantive_turns: int
 interjections: int
 questions_received: int
+challenging_questions: int          # podstatné priame otázky (viď Responsiveness)
+questions_dodged: int
+questions_partial: int
 interruptions_caused: int
 ```
 
@@ -196,10 +200,11 @@ rate_per_1000 = penalty_points / normalization_words * 1000
 score = max(0, 100 - rate_per_1000)
 ```
 
-Rovnako pre `responsiveness` (`W_DODGE * n_dodge`).
+Platí pre `manipulation`. `responsiveness` má vlastný vzorec (nižšie),
+nezávislý od počtu slov.
 
-- `words == 0` pre hosťa (mapovanie zlyhalo): `manipulation` a
-  `responsiveness` majú `score = None`, detail „chýbajú štatistiky reči“.
+- `words == 0` pre hosťa (mapovanie zlyhalo): `manipulation` má
+  `score = None`, detail „chýbajú štatistiky reči“.
   Celkové skóre sa renormalizuje cez dostupné disciplíny (existujúca logika).
 - `_MIN_WORDS_FLOOR = 500` ostáva iba ako poistka proti degenerovanému prípadu;
   keď sa použije, `normalization_words != words` je vidno v JSON a pridá sa
@@ -208,6 +213,76 @@ Rovnako pre `responsiveness` (`W_DODGE * n_dodge`).
   `speaker_map.status != "ok"` alebo niektorý hosť má `words == 0`.
   V stave `degraded` sa `winner` ani `discipline_winners` pre behaviorálne
   disciplíny nevyhlasujú.
+
+### Responsiveness: vyhnutia / podstatné priame otázky
+
+Vyhýbanie sa otázke má zmysel iba vzhľadom na položené otázky, a iba na
+otázky, ktoré naozaj vyžadujú odpoveď. Normalizácia na 1000 slov sa ruší.
+
+#### Question audit (nový krok vo fáze A, `src/questions.py`)
+
+1. **Kandidáti (kód).** Každá veta končiaca `?` v prehovore moderátora.
+   Adresát = oslovený rečník (`pán/pani X` v tom istom prehovore), inak
+   nasledujúci hosť, ktorý prehovorí. Odpoveď = všetky prehovory adresáta až
+   po ďalšiu otázku moderátora. Každý kandidát má `id`, `timestamp`, text
+   otázky, adresáta a `answer_span` (riadky odpovede).
+   Otázky medzi hosťami sa nepočítajú: v debate sú prevažne rečnícke a
+   nikto od oponenta odpoveď nevyžaduje.
+2. **Klasifikácia (LLM, jedno volanie nad zoznamom kandidátov, nie celým
+   prepisom).** Pre každý kandidát:
+
+   | `kind` | Význam | Počíta sa do menovateľa |
+   | --- | --- | --- |
+   | `challenging` | priama otázka k podstate: konkrétny postoj (áno/nie), číslo, zodpovednosť, termín, konfrontácia s rozporom alebo faktom | áno |
+   | `open` | mäkká otvorená výzva („Ako to vidíte?“, „Čo na to poviete?“) | nie |
+   | `procedural` | réžia debaty („Dokončíte?“, „Môžeme ísť ďalej?“) | nie |
+   | `rhetorical` | otázka bez očakávanej odpovede | nie |
+
+   Pre `challenging` aj `outcome`:
+
+   | `outcome` | Význam | Váha v čitateli |
+   | --- | --- | --- |
+   | `answered` | odpoveď priamo reaguje na jadro otázky (aj keď nepríjemne alebo s výhradou) | 0 |
+   | `partial` | odpovie na časť, jadro (číslo, áno/nie, zodpovednosť) vynechá | 0,5 |
+   | `dodged` | odbočí na inú tému, protiútok, „to sa pýtajte inde“ bez vecnej odpovede | 1 |
+   | `interrupted` | adresát nedostal priestor (< 15 slov odpovede pred ďalším vstupom) | vylúčená z menovateľa |
+
+   Každé `partial`/`dodged` musí mať `evidence`: citáciu otázky a citáciu
+   z `answer_span`, ktorá ukazuje odbočenie. Rozlišovať: tvrdá alebo nepohodlná
+   odpoveď je `answered`, nie `dodged`.
+3. **Validácia (kód).** Citácia otázky musí ležať v riadku moderátora s daným
+   `timestamp`, citácia odpovede v `answer_span` adresáta. Neplatný dôkaz →
+   `outcome` sa zmení na `answered` (v pochybnosti v prospech rečníka)
+   a pridá sa poznámka. Odpoveď v riadku `(cez seba)` → `interrupted`.
+4. `behavioral_analysis.speakers[].question_dodging` sa už negeneruje voľným
+   textom; renderuje sa z auditu (`[MM:SS] otázka → dôvod`), aby existoval
+   jeden zdroj pravdy.
+
+#### Vzorec
+
+```python
+n = challenging - interrupted          # podstatné otázky, kde mal priestor
+dodge_mass = dodged + 0.5 * partial
+dodge_rate = (dodge_mass + _DODGE_PRIOR_MASS) / (n + _DODGE_PRIOR_QUESTIONS)
+score = 100 * (1 - dodge_rate)          # None, ak n == 0
+```
+
+`_DODGE_PRIOR_QUESTIONS = 2`, `_DODGE_PRIOR_MASS = 0.3` (rovnaký princíp ako
+truthfulness: 1 vyhnutie z 1 otázky nie je 0 bodov, 1 odpoveď z 1 nie je 100).
+
+Príklad: 8 podstatných otázok, 1 prerušená, 2 vyhnutia, 1 čiastočná →
+`n = 7`, `dodge_mass = 2,5`, `rate = 2,8 / 9 = 0,311`, `score = 68,9`.
+
+`DisciplineResult` pre responsiveness: `inputs = {"challenging": 8,
+"interrupted": 1, "dodged": 2, "partial": 1}`, `weights = {"dodged": 1.0,
+"partial": 0.5}`, `rate = 0.311`, `penalty_points`/`normalization_words` sú
+`None`. `evidence` = zoznam vyhnutí s časom a citáciami.
+
+Odznak „Nx vyhýbanie sa otázke“ sa počíta z `questions_dodged` (dnes
+z dĺžky voľného zoznamu `question_dodging`).
+
+Moderátorský audit dostane bonus metriku: počet podstatných otázok na
+každého hosťa. Výrazný nepomer (napr. 12 vs 4) ide do `moderator_audit.findings`.
 
 ### Transparentnosť disciplíny
 
@@ -218,7 +293,8 @@ inputs: dict[str, int]          # {"manipulation": 3, "fallacies": 2}
 weights: dict[str, float]       # {"manipulation": 8.0, "fallacies": 6.0}
 penalty_points: float | None
 normalization_words: int | None
-rate_per_1000: float | None
+rate_per_1000: float | None     # manipulation
+rate: float | None              # responsiveness (podiel 0-1)
 ```
 
 Z týchto polí musí ísť skóre prepočítať ručne.
@@ -353,11 +429,19 @@ pôvodný ASR text vedľa opraveného.
   "verdict": {"scoring_status": "ok",
     "scoreboard": [{"speaker": "Erik Tomáš", "words": 6278, "word_share_percent": 58.0,
       "transcript_share_percent": 44.6, "turns": 61, "substantive_turns": 38,
-      "interjections": 14, "questions_received": 19, "interruptions_caused": 7,
+      "interjections": 14, "questions_received": 19, "challenging_questions": 8,
+      "questions_dodged": 2, "questions_partial": 1, "interruptions_caused": 7,
       "claims_extracted": 18, "claims_selected": 15, "checked_claims": 11,
-      "disciplines": [{"discipline": "manipulation", "inputs": {"manipulation": 3, "fallacies": 2},
-        "weights": {"manipulation": 8.0, "fallacies": 6.0}, "penalty_points": 36.0,
-        "normalization_words": 6278, "rate_per_1000": 5.7, "score": 94.3}]}]}
+      "disciplines": [
+        {"discipline": "manipulation", "inputs": {"manipulation": 3, "fallacies": 2},
+         "weights": {"manipulation": 8.0, "fallacies": 6.0}, "penalty_points": 36.0,
+         "normalization_words": 6278, "rate_per_1000": 5.7, "score": 94.3},
+        {"discipline": "responsiveness",
+         "inputs": {"challenging": 8, "interrupted": 1, "dodged": 2, "partial": 1},
+         "weights": {"dodged": 1.0, "partial": 0.5}, "rate": 0.311, "score": 68.9}]}]},
+  "question_audit": [{"id": 7, "timestamp": "12:40", "addressee": "Erik Tomáš",
+    "question": "Zvýšite teda DPH, áno alebo nie?", "kind": "challenging",
+    "outcome": "dodged", "evidence": ["[12:44] Pozrime sa, čo urobila vaša vláda…"]}]
 }
 ```
 
@@ -368,6 +452,7 @@ pôvodný ASR text vedľa opraveného.
 | `src/speakers.py` | nový: `map_speakers`, `apply_speaker_map`, `canonical_speaker` |
 | `src/correction.py` | nový: `propose_corrections`, `apply_corrections`, guardy |
 | `src/agents.py` | modely; `run_analysis` nový tok; odstrániť `correct_transcript`; funnel |
+| `src/questions.py` | nový: `extract_question_candidates`, `classify_questions` (LLM), `validate_question_audit` |
 | `src/selection.py` | štruktúrované `excluded` / `dropped` |
 | `src/scoring.py` | stats podľa mapy, nové polia, bez `_DEFAULT_WORDS`, gate, štruktúrované disciplíny |
 | `src/validation.py` | `quote_attributed`, `quote_raw_support`, prísnejšie pravidlá pre obvinenia; `validate_facts` vracia odstránené fakty |
@@ -389,6 +474,11 @@ pôvodný ASR text vedľa opraveného.
 - `tests/test_validation.py`: False fakt s citáciou z riadku iného rečníka →
   `Unverified`; citácia závislá od `PROPER_NOUN` editu → `Unverified`.
 - Funnel invarianty.
+- `tests/test_questions.py`: extrakcia kandidátov (adresát z oslovenia aj
+  z nasledujúceho hosťa, `answer_span` končí pri ďalšej otázke moderátora);
+  `open`/`procedural`/`rhetorical` nejdú do menovateľa; `interrupted` sa
+  vylúči; neplatná citácia odpovede → `answered`; vzorec na príklade
+  8/1/2/1 → 68,9; `n == 0` → `None`.
 
 ## Overenie na dátach
 
@@ -396,10 +486,5 @@ Prebeh 620752 z existujúceho `data/transcripts/620752.txt` (bez ASR):
 `words` hostí v pásme ±5 % od `620752.empty-facts.bak.json` (6278 / 4537),
 `equal_time_distribution` s menami, `scoring_status = ok`,
 `corrections.json` bez zamietnutí typu číslo/negácia na manuálnej kontrole 20 náhodných editov.
-
-## Otvorené rozhodnutie
-
-`responsiveness` je podľa zadania normalizovaná na 1000 slov. Presnejšia
-miera je `n_dodge / questions_received` (vyhýbanie sa otázke dáva zmysel
-iba vzhľadom na položené otázky). Spec pridáva `questions_received` ako
-surovú metriku; prepnutie vzorca je samostatné rozhodnutie.
+Question audit: ručná kontrola všetkých `dodged` v 620752 (každé má platnú
+citáciu otázky aj odpovede, žiadne „tvrdá odpoveď = vyhnutie“).
