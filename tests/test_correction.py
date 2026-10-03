@@ -6,7 +6,7 @@ import pytest
 
 from src.correction import apply_corrections, check_edit, number_tokens
 from src.report_models import EditType, TranscriptEdit
-from src.transcript_lines import parse_lines
+from src.transcript_lines import format_lines, parse_lines
 
 NAMES = {"Erik Tomáš", "Marián Viskupič", "Milan Majerský", "HLAS"}
 SPEAKERS = {"Moderátor", "Erik Tomáš", "Marián Viskupič"}
@@ -258,3 +258,100 @@ def test_sto_compounds_and_collectives_rejected(before: str, after: str) -> None
 )
 def test_more_ordinary_words_are_not_numeralish(word: str) -> None:
     assert number_tokens(f"Povedal {word} včera.") == []
+
+
+from src.correction import (  # noqa: E402
+    CorrectionBatch,
+    correct_transcript_edits,
+    propose_corrections,
+)
+
+
+def _many(n: int) -> str:
+    return "".join(f"Moderátor [{i // 60:02d}:{i % 60:02d}]: riadok {i} pre ľudi\n" for i in range(n))
+
+
+def test_propose_chunks_and_drops_out_of_range_edits() -> None:
+    lines = parse_lines(_many(85))
+    prompts: list[str] = []
+
+    def fake(prompt: str) -> CorrectionBatch:
+        prompts.append(prompt)
+        n = len(prompts) - 1
+        return CorrectionBatch(edits=[
+            TranscriptEdit(line_no=n * 40, type=S, before="ľudi", after="ľudí"),
+            TranscriptEdit(line_no=999, type=S, before="x", after="y"),
+        ])
+
+    edits, notes = propose_corrections(lines, llm=fake, allowed_names=set(), speaker_names={"Moderátor"})
+    assert len(prompts) == 3
+    assert [x.line_no for x in edits] == [0, 40, 80]
+    assert "Edit only lines #40..#79" in prompts[1]
+    assert "#35 Moderátor" in prompts[1]  # 5 context lines before the chunk
+    assert notes == []
+
+
+def test_failed_chunk_is_noted_and_skipped() -> None:
+    lines = parse_lines(_many(85))
+    calls = {"n": 0}
+
+    def fake(prompt: str) -> CorrectionBatch:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("timeout")
+        return CorrectionBatch(edits=[])
+
+    _, notes = propose_corrections(lines, llm=fake, allowed_names=set(), speaker_names=set())
+    assert calls["n"] == 3
+    assert len(notes) == 1 and "#40-#79" in notes[0]
+
+
+def test_correct_transcript_edits_end_to_end() -> None:
+    named = (
+        "Moderátor [00:10]: Vitajte pre ľudi.\n"
+        "Erik Tomáš [00:12]: Strana HLas presadila zo 40 na 135 eur.\n"
+    )
+
+    def fake(prompt: str) -> CorrectionBatch:
+        return CorrectionBatch(edits=[
+            TranscriptEdit(line_no=0, type=S, before="ľudi", after="ľudí"),
+            TranscriptEdit(line_no=1, type=PN, before="HLas", after="HLAS"),
+            TranscriptEdit(line_no=1, type=S, before="40", after="140"),
+        ])
+
+    out = correct_transcript_edits(
+        named, llm=fake, allowed_names={"HLAS"}, speaker_names={"Moderátor", "Erik Tomáš"}
+    )
+    assert out.text == (
+        "Moderátor [00:10]: Vitajte pre ľudí.\n"
+        "Erik Tomáš [00:12]: Strana HLAS presadila zo 40 na 135 eur.\n"
+    )
+    assert out.quality.applied == 2
+    assert out.quality.rejected_by_rule == {"number": 1}
+    assert [ln.raw_no for ln in out.lines] == [0, 1]
+    assert out.lines[1].edit_ids == [1]
+
+
+def test_chunk_edits_use_global_indices_with_split_in_later_chunk() -> None:
+    # A split in chunk 2 shifts later lines; the edit must still hit the right line.
+    lines = parse_lines(_many(45))
+    lines[41].text = "pravda Marián Viskupič: dobre"
+    calls = {"n": 0}
+
+    def fake(prompt: str) -> CorrectionBatch:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CorrectionBatch(edits=[])
+        return CorrectionBatch(edits=[
+            TranscriptEdit(line_no=41, type=EditType.SPLIT_TURN, before="Marián",
+                           new_speaker="Marián Viskupič"),
+            TranscriptEdit(line_no=43, type=S, before="ľudi", after="ľudí"),
+        ])
+
+    out = correct_transcript_edits(
+        format_lines(lines), llm=fake, allowed_names=set(),
+        speaker_names={"Moderátor", "Marián Viskupič"},
+    )
+    assert out.quality.applied == 2
+    assert out.lines[41].text == "pravda" and out.lines[42].speaker == "Marián Viskupič"
+    assert out.lines[44].text == "riadok 43 pre ľudí"

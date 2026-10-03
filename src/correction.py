@@ -9,11 +9,18 @@ and turn splits are allowed. Every decision is logged.
 from __future__ import annotations
 
 import difflib
+import logging
 import re
-from dataclasses import replace
+from collections import Counter
+from dataclasses import dataclass, replace
+from typing import Callable
 
-from src.report_models import EditResult, EditType, TranscriptEdit
-from src.transcript_lines import Line
+from pydantic import BaseModel, Field
+
+from src.report_models import EditResult, EditType, TranscriptEdit, TranscriptQuality
+from src.transcript_lines import Line, format_lines, parse_lines
+
+logger = logging.getLogger(__name__)
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
@@ -214,3 +221,115 @@ def apply_corrections(
     for i, ln in enumerate(out):
         ln.no = i
     return out, log
+
+
+CHUNK_LINES = 40
+CONTEXT_LINES = 5
+
+_RULES = (
+    "You fix ASR errors in a Slovak TV debate transcript. Return ONLY a list "
+    "of small edits; never rewrite lines.\n"
+    "Allowed edit types:\n"
+    "- spelling: a misspelled word or missing diacritics ('ľudi' -> 'ľudí').\n"
+    "- word_boundary: wrongly split or merged words ('kpointe' -> 'k pointe').\n"
+    "- proper_noun: a misheard name, ONLY to a name from NAMES.\n"
+    "- punctuation: commas and sentence ends; words stay identical.\n"
+    "- split_turn: one line contains two speakers. `before` = the first words "
+    "spoken by the second speaker, copied exactly; `new_speaker` from SPEAKERS. "
+    "Use one split_turn per speaker change.\n"
+    "Never: fix grammar or style of spoken language, paraphrase, add missing "
+    "words, delete repetitions or filler words, change numbers or negation. "
+    "If unsure, propose nothing.\n"
+    "`before` must be copied exactly from the line and kept short (the wrong "
+    "word with at most one neighbour). `line_no` is the number after '#'.\n"
+)
+
+
+class CorrectionBatch(BaseModel):
+    edits: list[TranscriptEdit] = Field(default_factory=list)
+
+
+def build_correction_prompt(
+    lines: list[Line],
+    start: int,
+    end: int,
+    allowed_names: set[str],
+    speaker_names: set[str],
+) -> str:
+    # `#N` is the list index: apply_corrections addresses lines by index, so the
+    # prompt numbers must match it even if `Line.no` was renumbered upstream.
+    lo, hi = max(0, start - CONTEXT_LINES), min(len(lines), end + CONTEXT_LINES)
+    body = "\n".join(
+        f"#{i} {lines[i].speaker} [{lines[i].ts}]: {lines[i].text}" for i in range(lo, hi)
+    )
+    return (
+        f"{_RULES}\n"
+        f"NAMES: {', '.join(sorted(allowed_names)) or '(none)'}\n"
+        f"SPEAKERS: {', '.join(sorted(speaker_names)) or '(none)'}\n\n"
+        f"Edit only lines #{start}..#{end - 1}; other lines are context.\n\n{body}"
+    )
+
+
+def propose_corrections(
+    lines: list[Line],
+    *,
+    llm: Callable[[str], CorrectionBatch],
+    allowed_names: set[str],
+    speaker_names: set[str],
+) -> tuple[list[TranscriptEdit], list[str]]:
+    """Ask the LLM for edits chunk by chunk; edits keep global list indices.
+
+    Prompts show global indices and the whole `lines` list is later passed to
+    `apply_corrections`, so no index translation is needed; edits outside the
+    chunk's own range are dropped.
+    """
+    edits: list[TranscriptEdit] = []
+    notes: list[str] = []
+    for start in range(0, len(lines), CHUNK_LINES):
+        end = min(len(lines), start + CHUNK_LINES)
+        try:
+            batch = llm(build_correction_prompt(lines, start, end, allowed_names, speaker_names))
+        except Exception as exc:  # noqa: BLE001 - a failed chunk keeps its raw text
+            logger.warning("Correction chunk %d-%d failed: %s", start, end - 1, exc)
+            notes.append(f"Transcript correction chunk #{start}-#{end - 1} failed: {exc}"[:300])
+            continue
+        edits.extend(x for x in batch.edits if start <= x.line_no < end)
+    return edits, notes
+
+
+@dataclass
+class CorrectionOutcome:
+    text: str
+    lines: list[Line]
+    log: list[EditResult]
+    quality: TranscriptQuality
+    notes: list[str]
+
+
+def correct_transcript_edits(
+    named_text: str,
+    *,
+    llm: Callable[[str], CorrectionBatch],
+    allowed_names: set[str],
+    speaker_names: set[str],
+) -> CorrectionOutcome:
+    lines = parse_lines(named_text)
+    edits, notes = propose_corrections(
+        lines, llm=llm, allowed_names=allowed_names, speaker_names=speaker_names
+    )
+    out, log = apply_corrections(lines, edits, allowed_names, speaker_names)
+    quality = TranscriptQuality(
+        applied=sum(1 for r in log if r.applied),
+        rejected_by_rule=dict(Counter(r.rule for r in log if not r.applied)),
+    )
+    return CorrectionOutcome(
+        text=format_lines(out), lines=out, log=log, quality=quality, notes=notes
+    )
+
+
+def default_correction_llm(settings) -> Callable[[str], CorrectionBatch]:
+    from src.llm import generate_json
+
+    return lambda prompt: generate_json(
+        prompt, CorrectionBatch, settings, label="transcript_correction"
+    )
