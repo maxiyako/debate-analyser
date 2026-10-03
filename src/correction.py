@@ -212,19 +212,38 @@ def apply_corrections(
         if not cuts:
             out.append(ln)
             continue
-        cuts.sort()
+        # Guest line: a foreign new_speaker takes only `before`; the tail
+        # reverts to the guest unless another cut already sits at that end.
+        # Moderátor / Záznam keep the old takeover (intro: guest gets the tail).
+        points: list[tuple[int, str]] = [
+            (pos, log[eid].edit.new_speaker) for pos, eid in cuts
+        ]
+        if ln.speaker.casefold() not in {"moderátor", "záznam"}:
+            occupied = {p for p, _ in points}
+            for pos, eid in cuts:
+                edit = log[eid].edit
+                if edit.new_speaker == ln.speaker:
+                    continue
+                end = pos + len(edit.before)
+                if end not in occupied:
+                    points.append((end, ln.speaker))
+                    occupied.add(end)
+        points.sort(key=lambda c: c[0])
         split_ids = sorted(eid for _, eid in cuts)
         base_ids = [i for i in ln.edit_ids if i not in set(split_ids)]
-        bounds = [0, *(p for p, _ in cuts), len(ln.text)]
-        speakers = [ln.speaker, *(log[eid].edit.new_speaker for _, eid in cuts)]
+        bounds = [0, *(p for p, _ in points), len(ln.text)]
+        speakers = [ln.speaker, *(who for _, who in points)]
         # Every segment exists because of the cuts, the first one included: a
         # quote from any of them depends on the split being right.
         for j, speaker in enumerate(speakers):
+            text = ln.text[bounds[j] : bounds[j + 1]].strip()
+            if not text:
+                continue
             out.append(
                 replace(
                     ln,
                     speaker=speaker,
-                    text=ln.text[bounds[j] : bounds[j + 1]].strip(),
+                    text=text,
                     edit_ids=[*base_ids, *split_ids],
                 )
             )

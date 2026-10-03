@@ -360,3 +360,89 @@ def test_chunk_edits_use_global_indices_with_split_in_later_chunk() -> None:
     assert out.quality.applied == 2
     assert out.lines[41].text == "pravda" and out.lines[42].speaker == "Marián Viskupič"
     assert out.lines[44].text == "riadok 43 pre ľudí"
+
+
+# --- guest-line split_turn: interjection only, not the tail -----------------
+
+
+def test_guest_line_split_keeps_tail_with_guest() -> None:
+    lines = parse_lines(
+        "Erik Tomáš [01:08:38]: No, ja nie som zodpovedný za prorastový balík. "
+        "A prečo ho nemáte? Lebo to nie je môj balík.\n"
+    )
+    edits = [
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="A prečo ho nemáte?",
+            new_speaker="Moderátor",
+        )
+    ]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert log[0].applied
+    assert [ln.speaker for ln in out] == ["Erik Tomáš", "Moderátor", "Erik Tomáš"]
+    assert [ln.text for ln in out] == [
+        "No, ja nie som zodpovedný za prorastový balík.",
+        "A prečo ho nemáte?",
+        "Lebo to nie je môj balík.",
+    ]
+    assert " ".join(ln.text for ln in out) == lines[0].text
+
+
+def test_two_moderator_interjections_on_guest_line() -> None:
+    lines = parse_lines(
+        "Erik Tomáš [01:15:17]: Palivo stojí veľa. Pardon, pardon. "
+        "Ceny rastú každý deň. Dokončite. Preto treba znížiť daň.\n"
+    )
+    edits = [
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="Pardon, pardon.",
+            new_speaker="Moderátor",
+        ),
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="Dokončite.",
+            new_speaker="Moderátor",
+        ),
+    ]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert all(r.applied for r in log)
+    assert [ln.speaker for ln in out] == [
+        "Erik Tomáš",
+        "Moderátor",
+        "Erik Tomáš",
+        "Moderátor",
+        "Erik Tomáš",
+    ]
+    assert [ln.text for ln in out] == [
+        "Palivo stojí veľa.",
+        "Pardon, pardon.",
+        "Ceny rastú každý deň.",
+        "Dokončite.",
+        "Preto treba znížiť daň.",
+    ]
+    assert " ".join(ln.text for ln in out) == lines[0].text
+
+
+def test_moderator_line_split_still_gives_guest_the_tail() -> None:
+    lines = parse_lines(
+        "Moderátor [01:58]: Vítam Erika Tomáša. Ďakujem za pozvanie a všetkým "
+        "prajem peknú nedeľu.\n"
+    )
+    edits = [
+        TranscriptEdit(
+            line_no=0,
+            type=EditType.SPLIT_TURN,
+            before="Ďakujem za pozvanie",
+            new_speaker="Erik Tomáš",
+        )
+    ]
+    out, log = apply_corrections(lines, edits, NAMES, SPEAKERS)
+    assert log[0].applied
+    assert [ln.speaker for ln in out] == ["Moderátor", "Erik Tomáš"]
+    assert out[0].text == "Vítam Erika Tomáša."
+    assert out[1].text == "Ďakujem za pozvanie a všetkým prajem peknú nedeľu."
+    assert " ".join(ln.text for ln in out) == lines[0].text
