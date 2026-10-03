@@ -214,3 +214,39 @@ def test_run_question_audit_and_failure() -> None:
 
     items, notes = run_question_audit(LINES, _smap(), llm=boom)
     assert items == [] and "failed" in notes[0]
+
+
+def test_duplicate_classification_ids_are_ignored() -> None:
+    items = extract_question_candidates(LINES, "Moderátor", GUESTS)
+
+    def dup(prompt: str) -> QuestionClassification:
+        return QuestionClassification(items=[
+            ClassifiedQuestion(id=1, kind=CH, outcome=ANSWERED),
+            ClassifiedQuestion(id=1, kind=CH, outcome=DODGED, reason="odbočil",
+                               evidence=["Dane nezvýšime, to vám garantujem"]),
+            ClassifiedQuestion(id=2, kind=CH, outcome=ANSWERED),
+            ClassifiedQuestion(id=3, kind=CH, outcome=ANSWERED),
+        ])
+
+    notes = classify_questions(items, llm=dup)
+    assert question_counts(items)["dodged"] == 0
+    assert items[0].kind == OPEN and items[0].outcome is None
+    assert "Question audit: duplicate classification for question 1 ignored" in notes
+    assert items[2].outcome == ANSWERED
+
+
+def test_grounded_partial_is_counted_and_rendered() -> None:
+    items = extract_question_candidates(LINES, "Moderátor", GUESTS)
+
+    def partial(prompt: str) -> QuestionClassification:
+        return QuestionClassification(items=[
+            ClassifiedQuestion(id=1, kind=CH, outcome=QuestionOutcome.PARTIAL, reason="čiastočne",
+                               evidence=["Dane nezvýšime, to vám garantujem"]),
+        ])
+
+    classify_questions(items, llm=partial)
+    assert items[0].outcome == QuestionOutcome.PARTIAL
+    assert question_counts(items)["partial"] == 1
+    assert render_dodges(items) == [
+        "[00:12] Pán Viskupič, zvýšite dane, áno alebo nie? → partial: čiastočne"
+    ]

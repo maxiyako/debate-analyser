@@ -156,9 +156,19 @@ def classify_questions(
     notes: list[str] = []
     if not items:
         return notes
-    by_id = {c.id: c for c in llm(build_question_prompt(items)).items}
+    by_id: dict[int, ClassifiedQuestion] = {}
+    duplicates: set[int] = set()
+    for c in llm(build_question_prompt(items)).items:
+        if c.id in by_id:
+            duplicates.add(c.id)
+        by_id[c.id] = c
     for it in items:
         c = by_id.get(it.id)
+        if it.id in duplicates:
+            # Conflicting classifications are doubt: leave the item uncounted.
+            it.kind, it.outcome, it.reason = QuestionKind.OPEN, None, "neklasifikované"
+            notes.append(f"Question audit: duplicate classification for question {it.id} ignored")
+            continue
         if c is None:
             it.kind, it.outcome, it.reason = QuestionKind.OPEN, None, "neklasifikované"
             notes.append(f"Question audit: #{it.id} [{it.timestamp}] not classified; not counted")
