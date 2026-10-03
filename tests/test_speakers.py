@@ -165,16 +165,52 @@ def test_ungrounded_evidence_zeroes_confidence() -> None:
     assert smap.status == "partial"
 
 
-def test_llm_failure_falls_back_to_heuristic() -> None:
-    def boom(prompt: str) -> SpeakerAssignment:
-        raise RuntimeError("vertex down")
+def _boom(prompt: str) -> SpeakerAssignment:
+    raise RuntimeError("vertex down")
 
-    smap = map_speakers(synthetic(), guests=GUESTS, llm=boom)
+
+def addressed() -> str:
+    """Like synthetic(), but the moderator addresses each guest by surname."""
+    rows = []
+    for row in synthetic().splitlines():
+        if row.startswith("M [") and "Pán minister" in row:
+            row = row.replace("Pán minister", "Pán Tomáš")
+        elif row.startswith("M [") and "Pán poslanec" in row:
+            row = row.replace("Pán poslanec", "Pán Viskupič")
+        rows.append(row)
+    return "\n".join(rows) + "\n"
+
+
+def test_llm_failure_leaves_guests_unnamed_without_evidence() -> None:
+    # The moderator never says a surname, so which label is which person is a
+    # coin flip: naming them would ship a swapped scoreboard as fact.
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=_boom)
+    assert smap.source == "heuristic"
+    assert smap.status == "failed"
+    assert smap.name_for("M") == "Moderátor"
+    assert smap.name_for("G1") == "G1"
+    assert smap.name_for("G2") == "G2"
+    assert all(e.confidence == 0.0 for e in smap.entries if e.label in ("G1", "G2"))
+    assert all(
+        e.role == SpeakerRole.GUEST for e in smap.entries if e.label in ("G1", "G2")
+    )
+
+
+def test_heuristic_names_guests_the_moderator_addresses_by_surname() -> None:
+    smap = map_speakers(addressed(), guests=GUESTS, llm=_boom)
     assert smap.source == "heuristic"
     assert smap.status == "partial"
     assert smap.name_for("G1") == "Erik Tomáš"
     assert smap.name_for("G2") == "Marián Viskupič"
     assert smap.name_for("M") == "Moderátor"
+
+
+@pytest.mark.skipif(not REAL.exists(), reason="local transcript not available")
+def test_heuristic_fallback_names_620752_labels_by_evidence() -> None:
+    smap = map_speakers(REAL.read_text(encoding="utf-8"), guests=GUESTS, llm=_boom)
+    assert smap.source == "heuristic"
+    assert smap.name_for("Speaker H") == "Erik Tomáš"
+    assert smap.name_for("Speaker D") == "Marián Viskupič"
 
 
 def test_roster_from_intro_when_no_cli_names() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable
 
@@ -28,6 +29,7 @@ _SPEAKER_ID = re.compile(r"\bspeaker\s+[a-z0-9]+\b", re.IGNORECASE)
 _TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
 _MIN_CONFIDENCE = 0.7
 _MIN_EVIDENCE_CHARS = 15
+_MIN_STEM = 4
 _EVIDENCE_MIN_RATIO = 0.85
 _SELF_ID = re.compile(
     r"\b(ja ako|my v|za stranu|naša strana|moja strana|ako minister|ako poslan)",
@@ -114,6 +116,12 @@ def apply_speaker_map(transcript: str, smap: SpeakerMap) -> str:
         name = smap.name_for(label) or label
         out.append(f"{name} [{m.group('ts')}]: {m.group('text').strip()}")
     return "\n".join(out) + ("\n" if out else "")
+
+
+def _fold(text: str) -> str:
+    """Casefold and drop diacritics: ASR writes 'Tomas' as often as 'Tomáš'."""
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 def _tokens(name: str) -> list[str]:
@@ -336,10 +344,64 @@ def validate_assignment(
     return list(entries.values()), notes, ok
 
 
+def _surname_stems(name: str) -> list[str]:
+    """Folded surname plus its 1-2 character shorter stems (Slovak case endings)."""
+    toks = [_fold(t) for t in _TOKEN.findall(name or "")]
+    if not toks:
+        return []
+    surname = toks[-1]
+    return [surname[: len(surname) - k] for k in range(3) if len(surname) - k >= _MIN_STEM]
+
+
+def _name_hits(lines: list[Line], name: str) -> int:
+    stems = _surname_stems(name)
+    if not stems:
+        return 0
+    return sum(1 for ln in lines if any(s in _fold(ln.text) for s in stems))
+
+
+def _evidence_assignment(
+    body: list[Line], guests: list[str], mod_label: str | None, roster: list[str]
+) -> dict[str, str]:
+    """Match guest labels to roster names by the transcript, or not at all.
+
+    Primary evidence: the moderator addressing a surname right before the
+    label's turn ("Viete si, pán Viskupič, predstaviť..."). Own lines are only a
+    tiebreak — in a duel each guest says the rival's name more often than their
+    own. A pair is used only when it beats every rival of both its label and its
+    name; anything ambiguous is left unassigned so the map degrades visibly
+    instead of publishing a swapped scoreboard.
+    """
+    scores = {
+        (label, name): (
+            _name_hits([ln for ln in ctx if ln.speaker != label], name),
+            _name_hits([ln for ln in ctx if ln.speaker == label], name),
+        )
+        for label in guests
+        for ctx in [label_context(body, label, mod_label)]
+        for name in roster
+    }
+    assigned: dict[str, str] = {}
+    labels, names = list(guests), list(roster)
+    while labels and names:
+        label, name = max(
+            ((lbl, nm) for lbl in labels for nm in names), key=lambda pair: scores[pair]
+        )
+        best = scores[(label, name)]
+        rivals = [scores[(label, nm)] for nm in names if nm != name]
+        rivals += [scores[(lbl, name)] for lbl in labels if lbl != label]
+        if best == (0, 0) or any(rival >= best for rival in rivals):
+            break
+        assigned[label] = name
+        labels.remove(label)
+        names.remove(name)
+    return assigned
+
+
 def _heuristic_entries(
     body: list[Line], roles: dict[str, SpeakerRole], roster: list[str], moderator_name: str
 ) -> list[SpeakerMapEntry]:
-    """Fallback: guests named in roster order by who speaks first after the recap."""
+    """Fallback: the moderator comes from turn taking, guests from name evidence."""
     first: dict[str, int] = {}
     for ln in body:
         first.setdefault(ln.speaker, ln.no)
@@ -352,10 +414,17 @@ def _heuristic_entries(
         for lbl, r in roles.items()
         if r == SpeakerRole.MODERATOR
     ]
-    for lbl, name in zip(guests, roster):
-        entries.append(SpeakerMapEntry(label=lbl, name=name, role=SpeakerRole.GUEST, confidence=0.3))
-    for lbl in guests[len(roster):]:
-        entries.append(SpeakerMapEntry(label=lbl, name=lbl, role=SpeakerRole.GUEST, confidence=0.0))
+    assigned = _evidence_assignment(body, guests, _moderator_label(roles), roster)
+    for lbl in guests:
+        name = assigned.get(lbl)
+        entries.append(
+            SpeakerMapEntry(
+                label=lbl,
+                name=name or lbl,
+                role=SpeakerRole.GUEST,
+                confidence=0.3 if name else 0.0,
+            )
+        )
     return entries
 
 
