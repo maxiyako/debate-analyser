@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import main
-from main import _split_guests, _verdict_line
+import pytest
+
 from src.agents import (
     AnalysisReport,
     BehavioralAnalysis,
@@ -14,7 +14,7 @@ from src.agents import (
     _allowed_names,
     _canonicalize_speakers,
 )
-from src.briefing import DebateBriefing, EntityEntry, Participant
+from src.briefing import DebateBriefing, EntityEntry, GlossaryEntry, Participant
 from src.report_models import SpeakerMap, SpeakerMapEntry, SpeakerRole
 from src.scoring import DebateVerdict
 from src.transcript_lines import parse_lines
@@ -29,10 +29,32 @@ def test_allowed_names_merge_map_and_briefing() -> None:
     briefing = DebateBriefing(
         participants=[Participant(name="Marián Viskupič", party="SaS")],
         entity_index=[EntityEntry(reference="minister financií", person="Ladislav Kamenický")],
+        glossary=[GlossaryEntry(term="konsolidácia", definition="zníženie deficitu")],
     )
     names = _allowed_names(smap, briefing)
     assert {"Erik Tomáš", "Marián Viskupič", "SaS", "Ladislav Kamenický"} <= names
+    # Glossary terms are ordinary words: as allowed proper nouns they would let
+    # the corrector replace any word of a claim with debate jargon.
+    assert "konsolidácia" not in names
     assert _allowed_names(smap, None) == {"Erik Tomáš"}
+
+
+def test_allowed_names_never_let_a_content_word_be_rewritten() -> None:
+    from src.correction import check_edit
+    from src.report_models import EditType, TranscriptEdit
+
+    smap = SpeakerMap(entries=[SpeakerMapEntry(label="H", name="Erik Tomáš", role=SpeakerRole.GUEST)])
+    briefing = DebateBriefing(
+        glossary=[
+            GlossaryEntry(term="konsolidácia", definition="d"),
+            GlossaryEntry(term="deficit", definition="d"),
+        ]
+    )
+    names = _allowed_names(smap, briefing)
+    line = "Minuli sme to z rozpočtu."
+    for before, after in (("rozpočtu", "deficit"), ("Minuli", "konsolidácia")):
+        edit = TranscriptEdit(line_no=0, type=EditType.PROPER_NOUN, before=before, after=after)
+        assert check_edit(edit, line, names, {"Erik Tomáš"}) == "proper_noun"
 
 
 def test_canonicalize_speakers_in_facts_and_behavior() -> None:
@@ -80,20 +102,30 @@ def test_accusation_guard_needs_canonical_speakers_first() -> None:
     assert report.facts[0].quote_raw
 
 
+def _main():
+    """`main` pulls in the download stack; skip where it is not installed."""
+    pytest.importorskip("yt_dlp")
+    import main
+
+    return main
+
+
 def test_split_guests() -> None:
+    _split_guests = _main()._split_guests
     assert _split_guests("Erik Tomáš; Marián Viskupič ") == ["Erik Tomáš", "Marián Viskupič"]
     assert _split_guests(" ; ") is None
     assert _split_guests(None) is None
 
 
 def test_verdict_line_degraded_names_no_winner() -> None:
-    line = _verdict_line(DebateVerdict(scoring_status="degraded", margin=1.2, winner=""))
+    line = _main()._verdict_line(DebateVerdict(scoring_status="degraded", margin=1.2, winner=""))
     assert "degrad" in line
     assert "scoring_status=degraded" in line
     assert "náskok" not in line
 
 
 def test_verdict_line_tie_and_winner() -> None:
+    _verdict_line = _main()._verdict_line
     assert "nerozhodn" in _verdict_line(DebateVerdict(scoring_status="ok", margin=1.2))
     won = _verdict_line(DebateVerdict(scoring_status="ok", winner="Erik Tomáš", margin=9.0))
     assert "Erik Tomáš" in won and "9.0" in won
@@ -111,5 +143,5 @@ def test_run_analysis_takes_the_roster_and_has_no_llm_rewrite() -> None:
 
 
 def test_cli_has_guests_and_moderator_options() -> None:
-    opts = {opt.name for param in main.main.params for opt in [param]}
+    opts = {p.name for p in _main().main.params}
     assert {"guests", "moderator", "debate_date", "url"} <= opts

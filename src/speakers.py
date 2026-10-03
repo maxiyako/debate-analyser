@@ -278,12 +278,26 @@ def validate_assignment(
             ok = False
             continue
         seen.add(a.label)
-        if a.name == moderator_name:
+        name = a.name
+        if a.label == mod_label and name not in roster:
+            # The turn-taking heuristic owns the moderator label. Whatever person
+            # the LLM reads out of the intro, the moderator is published under the
+            # known name, so the label is never left unnamed (which would silently
+            # disable the question audit). A roster guest here is a real
+            # contradiction and is handled by the branches below.
+            if name != moderator_name:
+                notes.append(
+                    f"Speaker map: moderator label {a.label} named '{name}' by LLM; "
+                    f"using '{moderator_name}'"
+                )
+            name = moderator_name
             role = SpeakerRole.MODERATOR
-        elif a.name in roster:
+        elif name == moderator_name:
+            role = SpeakerRole.MODERATOR
+        elif name in roster:
             role = SpeakerRole.GUEST
         else:
-            notes.append(f"Speaker map: {a.label} -> '{a.name}' is not in the roster")
+            notes.append(f"Speaker map: {a.label} -> '{name}' is not in the roster")
             ok = False
             continue
         if (role == SpeakerRole.MODERATOR) != (a.label == mod_label):
@@ -304,7 +318,7 @@ def validate_assignment(
         if confidence < _MIN_CONFIDENCE:
             ok = False
         entries[a.label] = SpeakerMapEntry(
-            label=a.label, name=a.name, role=role, confidence=confidence, evidence=grounded[:3]
+            label=a.label, name=name, role=role, confidence=confidence, evidence=grounded[:3]
         )
     guest_names = [e.name for e in entries.values() if e.role == SpeakerRole.GUEST]
     dup = sorted({n for n in guest_names if guest_names.count(n) > 1})

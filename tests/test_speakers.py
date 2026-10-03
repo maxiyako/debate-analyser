@@ -250,6 +250,46 @@ def test_duplicate_label_keeps_first_assignment() -> None:
     assert smap.status == "partial"
 
 
+def test_moderator_label_keeps_the_known_moderator_name() -> None:
+    """The heuristic owns the moderator label; an LLM-invented person name is replaced."""
+
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[0].name = "Jana Nováková"
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    m = next(e for e in smap.entries if e.label == "M")
+    assert m.name == "Moderátor"
+    assert m.role == SpeakerRole.MODERATOR
+    assert m.confidence == 0.95
+    assert smap.status == "ok"
+    assert (
+        "Speaker map: moderator label M named 'Jana Nováková' by LLM; using 'Moderátor'"
+        in smap.notes
+    )
+
+
+def test_cli_moderator_name_overrides_the_llm() -> None:
+    smap = map_speakers(synthetic(), guests=GUESTS, moderator="Jana Nováková", llm=_good)
+    assert smap.name_for("M") == "Jana Nováková"
+    assert smap.moderator() == "Jana Nováková"
+    assert smap.status == "ok"
+
+
+def test_roster_guest_on_the_moderator_label_contradicts_the_heuristic() -> None:
+    def fake(prompt: str) -> SpeakerAssignment:
+        a = _good(prompt)
+        a.assignments[0].name = "Erik Tomáš"
+        return a
+
+    smap = map_speakers(synthetic(), guests=GUESTS, llm=fake)
+    m = next(e for e in smap.entries if e.label == "M")
+    assert m.role == SpeakerRole.GUEST
+    assert smap.status == "partial"
+    assert any("contradicts the turn-taking heuristic" in n for n in smap.notes)
+
+
 def test_prompt_lists_only_main_labels() -> None:
     lines = parse_lines(synthetic())
     roles = heuristic_roles(lines)

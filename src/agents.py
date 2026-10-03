@@ -1051,13 +1051,18 @@ def _transcript_block(transcript: str) -> str:
 
 
 def _allowed_names(smap: SpeakerMap, briefing: "DebateBriefing | None") -> set[str]:
-    """Proper nouns the transcript corrector may write: roster, parties, briefing people."""
+    """Proper nouns the transcript corrector may write: roster, parties, briefing people.
+
+    People and parties only. Glossary terms are ordinary words ("konsolidácia",
+    "deficit"), and the PROPER_NOUN guard allows any edit whose new words are all
+    in this set — so a glossary term here would license rewriting a content word
+    of a claim into debate jargon.
+    """
     names = {e.name for e in smap.entries}
     if briefing is not None:
         for p in briefing.participants:
             names.update([p.name, p.party])
         names.update(e.person for e in briefing.entity_index)
-        names.update(g.term for g in briefing.glossary)
     return {n for n in names if n}
 
 
@@ -2159,6 +2164,25 @@ def run_analysis(
     return report, corrected
 
 
+_PUBLISHER_EXCLUDE = {
+    "briefing",  # background only, never evidence
+    "speaker_map",  # plumbing
+    "transcript_quality",  # plumbing
+    # Derived data: the post takes question counts from DebateVerdict and the
+    # dodge texts from behavioral_analysis.question_dodging.
+    "question_audit",
+}
+
+
+def _publisher_report_json(report: AnalysisReport) -> str:
+    """The report as the publisher sees it: no code-made plumbing, no duplicates."""
+    return json.dumps(
+        report.model_dump(mode="json", exclude=_PUBLISHER_EXCLUDE),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 def generate_facebook_post(
     report: AnalysisReport,
     verdict: Any,
@@ -2172,15 +2196,7 @@ def generate_facebook_post(
         raise RuntimeError("GCP_PROJECT_ID is not configured")
 
     llm = build_llm(settings)
-    report_json = json.dumps(
-        # briefing is background only; the speaker map and the edit statistics
-        # are bulky plumbing the post must not quote.
-        report.model_dump(
-            mode="json", exclude={"briefing", "speaker_map", "transcript_quality"}
-        ),
-        ensure_ascii=False,
-        indent=2,
-    )
+    report_json = _publisher_report_json(report)
     verdict_json = json.dumps(
         verdict.model_dump(mode="json") if hasattr(verdict, "model_dump") else verdict,
         ensure_ascii=False,

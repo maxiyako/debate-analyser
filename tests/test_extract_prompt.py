@@ -24,14 +24,42 @@ def test_report_briefing_defaults_to_none() -> None:
     assert AnalysisReport().briefing is None
 
 
-def test_publisher_prompt_excludes_code_made_sections() -> None:
+def test_publisher_dump_excludes_code_made_sections() -> None:
+    import json
+
+    from src.agents import AnalysisReport, _publisher_report_json
+    from src.briefing import DebateBriefing
+    from src.report_models import QuestionItem, SpeakerMap, TranscriptQuality
+
+    report = AnalysisReport(
+        summary="zhrnutie",
+        briefing=DebateBriefing(topic="rozpočet"),
+        speaker_map=SpeakerMap(),
+        transcript_quality=TranscriptQuality(applied=3),
+        question_audit=[
+            QuestionItem(
+                id=1,
+                timestamp="00:10",
+                addressee="Erik Tomáš",
+                question="Koľko to stálo?",
+                answer_text="dlhá odpoveď",
+            )
+        ],
+    )
+    data = json.loads(_publisher_report_json(report))
+    assert data["summary"] == "zhrnutie"
+    for excluded in ("briefing", "speaker_map", "transcript_quality", "question_audit"):
+        assert excluded not in data
+    assert "dlhá odpoveď" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_publisher_prompt_reads_scoring_status() -> None:
     import inspect
 
     from src.agents import generate_facebook_post
 
-    src = inspect.getsource(generate_facebook_post)
-    assert 'exclude={"briefing", "speaker_map", "transcript_quality"}' in src
-    assert "scoring_status" in src  # no winner claims when scoring is degraded
+    # No winner may be claimed when scoring is degraded.
+    assert "scoring_status" in inspect.getsource(generate_facebook_post)
 
 
 def test_retry_empty_extraction_recovers() -> None:
