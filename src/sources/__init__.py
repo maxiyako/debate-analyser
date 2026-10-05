@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from src.sources.base import MediaSource
+from src.sources.stvr import StvrSource
 
-# Populated as concrete sources are added (StvrSource, Ta3PodcastSource).
-SOURCES: list[MediaSource] = []
+SOURCES: list[MediaSource] = [
+    StvrSource(),
+]
 
 
 def supported_hosts_message() -> str:
