@@ -46,7 +46,9 @@ pipeline stays unchanged.
 ### Registry (`src/sources/__init__.py`)
 
 Ordered list of source instances. `resolve(url)` returns the first match.
-Unknown host → clear error (Click `UsageError` / `ValueError` with supported hosts).
+Host match ignores a leading `www.` (`ta3.com` / `www.ta3.com`, `stvr.sk` /
+`www.stvr.sk`). Unknown host → clear `ValueError` listing supported hosts;
+`main.py` maps that to Click `UsageError`.
 
 ### Ship now
 
