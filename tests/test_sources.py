@@ -137,3 +137,40 @@ def test_ta3_download_writes_mp3(tmp_path, monkeypatch) -> None:
 
     assert path.name == "ta3-1074913.mp3"
     assert path.read_bytes() == mp3_bytes
+
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from src.ingestion import ingest
+
+
+def test_ingest_uses_resolved_source(tmp_path, monkeypatch) -> None:
+    from config import Settings
+
+    settings = Settings(_env_file=None)
+    monkeypatch.setattr(settings, "raw_dir", tmp_path / "raw")
+    monkeypatch.setattr(settings, "audio_dir", tmp_path / "audio")
+    settings.raw_dir.mkdir()
+    settings.audio_dir.mkdir()
+
+    media = settings.raw_dir / "ta3-1074913.mp3"
+    media.write_bytes(b"x")
+    wav = settings.audio_dir / "ta3-1074913.wav"
+    wav.write_bytes(b"RIFF")
+
+    fake_source = MagicMock()
+    fake_source.episode_id.return_value = "ta3-1074913"
+    fake_source.download.return_value = media
+
+    with patch("src.ingestion.resolve", return_value=fake_source):
+        with patch("src.ingestion.extract_audio", return_value=wav) as extract:
+            ep_id, media_path, audio_path = ingest(
+                "https://www.ta3.com/clanok/1074913/x", settings=settings
+            )
+
+    assert ep_id == "ta3-1074913"
+    assert media_path == media
+    assert audio_path == wav
+    fake_source.download.assert_called_once()
+    extract.assert_called_once_with(media, settings=settings)
