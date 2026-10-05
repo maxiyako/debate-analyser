@@ -44,7 +44,10 @@ Outputs:
 
 1. **Ingestion** — yt-dlp (`stvr` extractor) → ffmpeg 16 kHz mono WAV
 2. **Transcription** — Pyannote diarization + `kinit/whisper-large-v3-sk` → merged lines
-3. **Agents** (Vertex Gemini) — transcript corrector → Behavioral Analyst + Moderator Bias Auditor + Fact Extractor → grounded checker (Vertex Google Search grounding) + per-category specialists (ŠÚSR DATAcube, verified Slovak sources via ddgs) → Chief Critic → deterministic reconcile + validation + fair-play scoring → Facebook post
-4. **Fact sources** — Vertex Gemini grounding + FCRI-allowlisted Slovak/international sources; no extra API keys
+3. **Speaker map** — diarization labels (`Speaker A`) are resolved to real people in code (turn-taking heuristics + one small validated LLM call); pass the roster with `--guests "Erik Tomáš;Marián Viskupič"` and `--moderator "<name>"`. An uncertain map degrades scoring instead of guessing names.
+4. **Transcript correction** — the LLM only proposes small edits (spelling, word boundaries, known names, punctuation, turn splits); code applies them only when numbers, negation, and content words stay invariant, and logs every decision.
+5. **Agents** (Vertex Gemini) — Behavioral Analyst + Moderator Bias Auditor + Fact Extractor → grounded checker (Vertex Google Search grounding) + per-category specialists (ŠÚSR DATAcube, verified Slovak sources via ddgs) → Chief Critic
+6. **Deterministic layer** — question audit (which moderator questions got a real answer), claim funnel (extracted → selected → checked), quote/source validation, accusation guard, fair-play scoring → Facebook post
+7. **Fact sources** — Vertex Gemini grounding + FCRI-allowlisted Slovak/international sources; no extra API keys
 
 Designed to run locally now; Cloud Run / Vertex Pipeline later via the included Dockerfile.

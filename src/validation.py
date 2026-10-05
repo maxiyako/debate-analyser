@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from typing import Callable
 
 from src.agents import AnalysisReport, Verdict, VerifiedFact
+from src.correction import negation_flip, number_tokens
+from src.report_models import EditResult, EditType
+from src.transcript_lines import Line
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _QUOTE_RE = re.compile(r"[\"'„“”‚‘’«»]([^\"'„“”‚‘’«»]{6,})[\"'„“”‚‘’«»]")
@@ -66,6 +70,8 @@ _UA_HEADERS = {
 MIN_QUOTE_LEN = 8
 DEFAULT_MIN_RATIO = 0.6
 URL_CHECK_TIMEOUT = 6.0
+RAW_MIN_SIMILARITY = 0.85
+_ACCUSATION = (Verdict.FALSE, Verdict.MISLEADING)
 
 
 def normalize(text: str) -> str:
@@ -335,3 +341,141 @@ def validate_report(
     if all_notes:
         report.critic_notes = [*report.critic_notes, *all_notes]
     return report
+
+
+def best_window(quote: str, text: str) -> tuple[float, str]:
+    """Most similar run of words in `text`, as long as the quote (ratio, original words)."""
+    q = normalize(quote)
+    toks = (text or "").split()
+    if not q or not toks:
+        return 0.0, ""
+    n = len(q.split())
+    norm = [normalize(t) for t in toks]
+    q_chars = Counter(q)
+    # Upper bound on the ratio of every window (SequenceMatcher.quick_ratio logic,
+    # without building a matcher). Windows are then scored best-bound-first and the
+    # scan stops once no remaining bound can reach the best ratio, so the result
+    # (highest ratio, earliest window on ties) equals scoring every window in order.
+    cands: list[tuple[float, int, str]] = []
+    for i in range(max(1, len(toks) - n + 1)):
+        cand = " ".join(w for w in norm[i : i + n] if w)
+        c_chars = Counter(cand)
+        shared = sum(min(v, c_chars[c]) for c, v in q_chars.items())
+        cands.append((2.0 * shared / (len(q) + len(cand)), i, cand))
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    best_ratio, best_i = 0.0, -1
+    for bound, i, cand in cands:
+        if bound < best_ratio:
+            break
+        ratio = difflib.SequenceMatcher(None, q, cand).ratio()
+        if ratio > best_ratio or (ratio == best_ratio and ratio > 0 and i < best_i):
+            best_ratio, best_i = ratio, i
+    if best_i < 0:
+        return 0.0, ""
+    return best_ratio, " ".join(toks[best_i : best_i + n])
+
+
+def raw_quote_support(quote: str, raw_text: str) -> tuple[float, str]:
+    """Similarity of a (possibly ellipsis-joined) quote to the raw ASR text."""
+    parts = [p for p in _ELLIPSIS_RE.split(quote) if len(normalize(p)) >= MIN_QUOTE_LEN]
+    scored = [best_window(p, raw_text) for p in (parts or [quote])]
+    return min(s for s, _ in scored), " … ".join(w for _, w in scored)
+
+
+def _contains_run(hay: list[str], needle: list[str]) -> bool:
+    """True when `needle` occurs in `hay` as a contiguous in-order run (empty -> True)."""
+    n = len(needle)
+    return n == 0 or any(hay[i : i + n] == needle for i in range(len(hay) - n + 1))
+
+
+def name_words(names: set[str] | list[str]) -> set[str]:
+    """Casefolded words of every name the transcript corrector was allowed to write."""
+    return {w.casefold() for name in names for w in _WORD_RE.findall(name or "")}
+
+
+def _capitalised(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text or "") if w[:1].isupper()}
+
+
+def _edit_is_risky(result: EditResult, quote_norm: str, risky_words: set[str]) -> bool:
+    """True when the accusation could stand or fall on this applied edit.
+
+    A split decides who said the quote. Any other edit matters only inside the
+    quoted span, and then whenever it touches a name: the declared edit type is
+    the model's own word for it, so a 'spelling' fix of Fico to Fica is judged
+    by what it rewrites, not by its label.
+    """
+    edit = result.edit
+    if edit.type == EditType.SPLIT_TURN:
+        return True
+    if normalize(edit.after) not in quote_norm:
+        return False
+    if edit.type == EditType.PROPER_NOUN:
+        return True
+    words = {w.casefold() for w in _WORD_RE.findall(f"{edit.before} {edit.after}")}
+    return bool(words & risky_words) or _capitalised(edit.before) != _capitalised(edit.after)
+
+
+def _downgrade(fact: VerifiedFact, why: str, notes: list[str]) -> None:
+    notes.append(f'Downgraded {fact.verdict.value}->Unverified ({why}): "{fact.claim[:120]}"')
+    fact.verdict = Verdict.UNVERIFIED
+    fact.severity = None
+    fact.rationale = f"{fact.rationale} [{why}]".strip()
+
+
+def enforce_accusation_support(
+    facts: list[VerifiedFact],
+    corrected_lines: list[Line],
+    raw_lines: list[Line],
+    log: list[EditResult],
+    risky_words: set[str] | None = None,
+) -> list[str]:
+    """Annotate every fact with its raw ASR window; downgrade False/Misleading
+    verdicts whose quote is misattributed, cross-talk only, loosely quoted, or
+    dependent on a transcript correction."""
+    notes: list[str] = []
+    applied = {r.id: r for r in log if r.applied}
+    for fact in facts:
+        # These fields are code-owned; never trust values the LLM put in its output.
+        fact.quote_raw = ""
+        fact.timestamp = ""
+        fact.transcript_edits = []
+        accusation = fact.verdict in _ACCUSATION
+        if len(normalize(fact.quote)) < MIN_QUOTE_LEN:
+            # Too short to attribute to a line; an accusation needs a substantive quote.
+            if accusation:
+                _downgrade(fact, "citácia je príliš krátka na overenie", notes)
+            continue
+        reliable = [ln for ln in corrected_lines if ln.speaker == fact.speaker and not ln.crosstalk]
+        parts = [p for p in _ELLIPSIS_RE.split(fact.quote or "") if p.strip()] or [fact.quote or ""]
+        hits = [ln for ln in reliable if any(quote_grounded(p, ln.text) for p in parts)]
+        if not hits or not quote_grounded(fact.quote or "", "\n".join(ln.text for ln in hits)):
+            if accusation:
+                _downgrade(fact, "nepotvrdené priradenie rečníka", notes)
+            continue
+        fact.timestamp = hits[0].ts
+        raw_text = "\n".join(
+            raw_lines[ln.raw_no].text
+            for ln in hits
+            if ln.raw_no is not None and ln.raw_no < len(raw_lines)
+        )
+        similarity, window = raw_quote_support(fact.quote, raw_text)
+        fact.quote_raw = window
+        fact.transcript_edits = sorted({i for ln in hits for i in ln.edit_ids if i in applied})
+        if not accusation:
+            continue
+        quote_norm = normalize(fact.quote)
+        risky = [
+            applied[i]
+            for i in fact.transcript_edits
+            if _edit_is_risky(applied[i], quote_norm, risky_words or set())
+        ]
+        if similarity < RAW_MIN_SIMILARITY:
+            _downgrade(fact, "citácia sa nezhoduje s pôvodným prepisom", notes)
+        elif risky:
+            _downgrade(fact, "verdikt závisí od opravy prepisu", notes)
+        elif not _contains_run(number_tokens(window), number_tokens(fact.quote)) or (
+            negation_flip(fact.quote, window)
+        ):
+            _downgrade(fact, "číslo alebo zápor v citácii chýba v pôvodnom prepise", notes)
+    return notes

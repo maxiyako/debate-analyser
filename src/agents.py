@@ -15,6 +15,13 @@ from pydantic import BaseModel, Field
 from config import Settings, get_settings
 from src.costs import TRACKER
 from src.briefing import DebateBriefing
+from src.report_models import (
+    ClaimFunnel,
+    EditResult,
+    QuestionItem,
+    SpeakerMap,
+    TranscriptQuality,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,7 @@ class BehavioralAnalysis(BaseModel):
 class TimeShare(BaseModel):
     speaker: str
     approximate_share_percent: float = 0.0
+    turns: int = 0
 
 
 class ModeratorAudit(BaseModel):
@@ -211,6 +219,15 @@ class VerifiedFact(BaseModel):
         ),
     )
     rationale: str = ""
+    quote_raw: str = Field(
+        default="",
+        description="The matching window of the original ASR transcript (before correction).",
+    )
+    timestamp: str = ""
+    transcript_edits: list[int] = Field(
+        default_factory=list,
+        description="Ids of applied transcript edits on the quoted line(s).",
+    )
 
 
 class AnalysisReport(BaseModel):
@@ -223,6 +240,10 @@ class AnalysisReport(BaseModel):
         default=None,
         description="Phase 0 political briefing (background only, never evidence).",
     )
+    speaker_map: SpeakerMap | None = None
+    question_audit: list[QuestionItem] = Field(default_factory=list)
+    claim_funnel: list[ClaimFunnel] = Field(default_factory=list)
+    transcript_quality: TranscriptQuality | None = None
 
 
 class ClaimHighlight(BaseModel):
@@ -250,6 +271,10 @@ class CorrectedTranscript(BaseModel):
     notes: list[str] = Field(
         default_factory=list,
         description="Short notes on speaker reassignments and splits performed.",
+    )
+    log: list[EditResult] = Field(
+        default_factory=list,
+        description="Every proposed transcript edit with its guard decision.",
     )
 
 
@@ -1025,81 +1050,32 @@ def _transcript_block(transcript: str) -> str:
     return f"DEBATE TRANSCRIPT:\n\n{transcript}"
 
 
-def correct_transcript(
-    transcript: str, settings: Settings | None = None
-) -> CorrectedTranscript:
-    """Fix diarization errors — mainly wrong speaker labels / mixed turns."""
-    from crewai import Agent, Crew, Process, Task
+def _allowed_names(smap: SpeakerMap, briefing: "DebateBriefing | None") -> set[str]:
+    """Proper nouns the transcript corrector may write: roster, parties, briefing people.
 
-    settings = settings or get_settings()
-    if not settings.vertex_ready():
-        raise RuntimeError("GCP_PROJECT_ID is not configured")
+    People and parties only. Glossary terms are ordinary words ("konsolidácia",
+    "deficit"), and the PROPER_NOUN guard allows any edit whose new words are all
+    in this set — so a glossary term here would license rewriting a content word
+    of a claim into debate jargon.
+    """
+    names = {e.name for e in smap.entries}
+    if briefing is not None:
+        for p in briefing.participants:
+            names.update([p.name, p.party])
+        names.update(e.person for e in briefing.entity_index)
+    return {n for n in names if n}
 
-    llm = build_llm(settings)
 
-    corrector = Agent(
-        role="Transcript Corrector",
-        goal=(
-            "Correct speaker attribution in a diarized debate transcript. "
-            "Split mixed turns so each utterance belongs to the right speaker."
-        ),
-        backstory=(
-            "You specialize in fixing ASR+diarization errors in political debates. "
-            "You use turn-taking cues: greetings, questions vs answers, forms of address "
-            "(pán/pani + name), moderator framing, and self-identification. "
-            "You never invent dialogue — only reassign or split existing text."
-        ),
-        llm=llm,
-        verbose=True,
-        allow_delegation=False,
-    )
+def _canonicalize_speakers(report: AnalysisReport, names: list[str]) -> None:
+    """Rewrite agent-written speaker names to the speaker-map roster."""
+    from src.speakers import canonical_speaker
 
-    task = Task(
-        description=(
-            "Oprav transcript a diarizáciu v transcripte politickej debaty.\n\n"
-            "HLAVNÝ CIEĽ: správne priradenie viet/úsekov ku rečníkom.\n\n"
-            "PRAVIDLÁ:\n"
-            "- Oprav iba jasné chyby a preklepy v textoch a vo vetách spôsobených transkriptom, ale iba ak to je zjavne spôsobené prepisom, nesprávnym diarizáciou alebo inými chybami v spracovaní.\n"
-            "- Keď rečníci hovoria cez seba, transcript vykazuje znaky zvláštnych vetných skladieb a rozdelených viet cez rečníkov. Na týchto miestach doplň (hovorenie cez seba) do textu príslušné mená rečníkov ak je to možné označiť aj ich identitu.\n"
-            "- Zachovaj formát riadkov: `Speaker X [MM:SS]: text` "
-            "(alebo skutočné mená, ak ich spoľahlivo identifikuješ).\n"
-            "- Zachovaj timestamps; pri splitnutí zmiešaného riadku použi ten istý čas "
-            "alebo najbližší rozumný čas z pôvodného riadku.\n"
-            "- Rozdeľ riadky, kde jeden label obsahuje reč dvoch ľudí "
-            "(napr. otázka moderátora + odpoveď hosťa v jednom bloku).\n"
-            "- Signály: pozdravy, 'ďakujem za pozvanie', otázky vs odpovede, "
-            "oslovovanie 'pán/pani X', citácie, typické frázy moderátora.\n"
-            "- Nemeň význam textu; nepridávaj nové vety; "
-            "okrem nutného rozdelenia pri zmene rečníka.\n"
-            "- Ak si nie si istý, nechaj pôvodný label.\n"
-            "- Do notes uveď krátke zhrnutie hlavných opráv.\n\n"
-            f"TRANSCRIPT:\n\n{transcript}"
-        ),
-        expected_output=(
-            "CorrectedTranscript: full corrected transcript text + notes on fixes."
-        ),
-        agent=corrector,
-        output_pydantic=CorrectedTranscript,
-    )
-
-    crew = Crew(
-        agents=[corrector],
-        tasks=[task],
-        process=Process.sequential,
-        verbose=True,
-    )
-    result = crew.kickoff()
-    TRACKER.add_crew("correct", result)
-
-    if isinstance(result.pydantic, CorrectedTranscript):
-        return result.pydantic
-
-    raw = result.raw if hasattr(result, "raw") else str(result)
-    try:
-        return CorrectedTranscript.model_validate(json.loads(raw))
-    except Exception:  # noqa: BLE001
-        logger.warning("Could not parse CorrectedTranscript; returning raw as text")
-        return CorrectedTranscript(text=raw.strip(), notes=["Unstructured corrector output"])
+    if not names:
+        return
+    for f in report.facts:
+        f.speaker = canonical_speaker(f.speaker, names) or f.speaker
+    for s in report.behavioral_analysis.speakers:
+        s.speaker = canonical_speaker(s.speaker, names) or s.speaker
 
 
 def _claims_json(claims: list[ExtractedClaim]) -> str:
@@ -1912,52 +1888,37 @@ def run_analysis(
     transcript: str,
     settings: Settings | None = None,
     debate_date: "date | None" = None,
+    guests: list[str] | None = None,
+    moderator: str | None = None,
 ) -> tuple[AnalysisReport, CorrectedTranscript]:
-    """Correct speaker labels, then run the phased analysis pipeline.
+    """Map speakers, correct the transcript by audited edits, then analyze.
 
-    Phases: A) behavioral/moderator/extraction → top-N salience cut in code →
-    B) grounded checker + per-category specialists → C) critic →
-    deterministic reconcile + validation. Returns (report, corrected).
+    Phases: 0) briefing -> speaker map -> edit-based correction -> A) behavioral/
+    moderator/extraction + question audit -> selection -> B) grounded checker +
+    specialists -> B2) manager -> C) critic -> deterministic reconcile, validation,
+    accusation guard, claim funnel. Returns (report, corrected).
     """
     settings = settings or get_settings()
     if not settings.vertex_ready():
         raise RuntimeError("GCP_PROJECT_ID is not configured")
 
-    logger.info("Correcting transcript speaker attribution")
-    corrected = correct_transcript(transcript, settings=settings)
-    working = corrected.text.strip() or transcript
-
+    from src.correction import correct_transcript_edits, default_correction_llm
     from src.reconcile import merge_checklists, parse_task_output, reconcile_checks
+    from src.speakers import CLIP_NAME, apply_speaker_map, default_speaker_llm, map_speakers
+    from src.transcript_lines import parse_lines
 
-    # Safety: the corrector must only relabel/split, never add or drop content.
-    # If the word count drifts too far, everything downstream would be built on
-    # a mutilated transcript — fall back to the original.
     pipeline_notes: list[str] = []
-    orig_words = len(transcript.split())
-    corr_words = len(working.split())
-    if orig_words and not (0.9 <= corr_words / orig_words <= 1.1):
-        logger.warning(
-            "Corrected transcript word count drifted (%d -> %d); using original",
-            orig_words,
-            corr_words,
-        )
-        pipeline_notes.append(
-            f"Transcript correction rejected: word count drifted {orig_words} -> "
-            f"{corr_words} (content added/lost); analysis used the original transcript."
-        )
-        working = transcript
-        corrected = CorrectedTranscript(
-            text=transcript, notes=[*corrected.notes, "Correction rejected (word drift)"]
-        )
 
-    # Phase 0: political briefing (background only — never evidence).
+    # Phase 0: political briefing (background only — never evidence). Labels are
+    # irrelevant to it, so it runs on the raw transcript and its participants
+    # then help the speaker mapper.
     briefing: DebateBriefing | None = None
     briefing_text = ""
     if settings.briefing_enabled and debate_date is not None:
         from src.briefing import render_briefing, run_briefing
 
         try:
-            briefing, briefing_notes = run_briefing(working, debate_date, settings)
+            briefing, briefing_notes = run_briefing(transcript, debate_date, settings)
             briefing_text = render_briefing(briefing)
             pipeline_notes.extend(briefing_notes)
             logger.info(
@@ -1975,6 +1936,45 @@ def run_analysis(
             briefing_text = ""
     elif settings.briefing_enabled:
         pipeline_notes.append("Briefing skipped: no --debate-date given.")
+
+    logger.info("Mapping diarization labels to speakers")
+    smap = map_speakers(
+        transcript,
+        guests=guests,
+        moderator=moderator,
+        llm=default_speaker_llm(settings),
+        briefing_text=briefing_text,
+    )
+    pipeline_notes.append(
+        f"Speaker map: status {smap.status}, source {smap.source}, "
+        f"debate start {smap.debate_start or 'unknown'}: "
+        + ", ".join(f"{e.label}={e.name}" for e in smap.entries)
+    )
+    pipeline_notes.extend(smap.notes)
+    named = apply_speaker_map(transcript, smap)
+
+    logger.info("Correcting transcript by guarded edits")
+    outcome = correct_transcript_edits(
+        named,
+        llm=default_correction_llm(settings),
+        allowed_names=_allowed_names(smap, briefing),
+        speaker_names={e.name for e in smap.entries},
+        tail_owners={smap.moderator() or "Moderátor", CLIP_NAME},
+    )
+    pipeline_notes.extend(outcome.notes)
+    # `outcome.lines` carries edit ids and the raw line each line came from;
+    # re-parsing `working` would lose both, so the lines are passed on as-is.
+    use_edits = bool(outcome.text.strip())
+    working = outcome.text if use_edits else named
+    working_lines = outcome.lines if use_edits else parse_lines(named)
+    corrected = CorrectedTranscript(
+        text=working,
+        notes=[
+            f"Transcript edits applied: {outcome.quality.applied}; rejected by "
+            f"rule: {outcome.quality.rejected_by_rule}"
+        ],
+        log=outcome.log,
+    )
 
     # Phase A: behavioral + moderator + context-aware extraction.
     extract_crew, a_tasks = build_extract_crew(
@@ -1994,6 +1994,13 @@ def run_analysis(
     pipeline_notes.extend(retry_notes)
     behavioral_raw = getattr(a_tasks["behavioral"].output, "raw", "") or ""
     moderator_raw = getattr(a_tasks["moderator"].output, "raw", "") or ""
+
+    from src.questions import default_question_llm, run_question_audit
+
+    question_audit, q_notes = run_question_audit(
+        working_lines, smap, llm=default_question_llm(settings)
+    )
+    pipeline_notes.extend(q_notes)
 
     # Claim selection (deterministic, in code): consequence-based when a briefing
     # exists, otherwise the legacy salience top-N.
@@ -2101,8 +2108,24 @@ def run_analysis(
             if not review_ids:
                 break
 
+    # Code-owned report sections: the LLM sees these fields in the output
+    # schema, so they are always overwritten here, even when empty.
     report.facts = facts
     report.briefing = briefing
+    report.speaker_map = smap
+    report.question_audit = question_audit
+    report.transcript_quality = outcome.quality
+    report.moderator_audit.equal_time_distribution = []
+    guest_names = smap.guests()
+    _canonicalize_speakers(report, guest_names)
+
+    from src.questions import question_balance_finding, render_dodges
+
+    for s in report.behavioral_analysis.speakers:
+        s.question_dodging = render_dodges(
+            [q for q in question_audit if q.addressee == s.speaker]
+        )
+
     notes = [*pipeline_notes, *reconcile_notes, *manager_notes]
     if notes:
         report.critic_notes = [*report.critic_notes, *notes]
@@ -2122,11 +2145,47 @@ def run_analysis(
     moderator_notes = apply_deterministic_moderator_metrics(report, working)
     if moderator_notes:
         report.critic_notes = [*report.critic_notes, *moderator_notes]
+    balance = question_balance_finding(question_audit, guest_names)
+    if balance:
+        report.moderator_audit.findings.append(balance)
 
-    from src.validation import validate_report
+    from src.selection import build_claim_funnel
+    from src.validation import enforce_accusation_support, name_words, validate_report
 
     report = validate_report(report, working, allowed_urls=seen_urls)
+    # Speakers are already canonical here, which the guard needs: it matches
+    # a fact's speaker against the transcript line labels exactly.
+    accusation_notes = enforce_accusation_support(
+        report.facts,
+        working_lines,
+        parse_lines(named),
+        outcome.log,
+        risky_words=name_words(_allowed_names(smap, briefing)),
+    )
+    report.critic_notes = [*report.critic_notes, *accusation_notes]
+    report.claim_funnel = build_claim_funnel(
+        extracted.claims if extracted else [], kept_claims, report.facts, guest_names
+    )
     return report, corrected
+
+
+_PUBLISHER_EXCLUDE = {
+    "briefing",  # background only, never evidence
+    "speaker_map",  # plumbing
+    "transcript_quality",  # plumbing
+    # Derived data: the post takes question counts from DebateVerdict and the
+    # dodge texts from behavioral_analysis.question_dodging.
+    "question_audit",
+}
+
+
+def _publisher_report_json(report: AnalysisReport) -> str:
+    """The report as the publisher sees it: no code-made plumbing, no duplicates."""
+    return json.dumps(
+        report.model_dump(mode="json", exclude=_PUBLISHER_EXCLUDE),
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def generate_facebook_post(
@@ -2142,11 +2201,7 @@ def generate_facebook_post(
         raise RuntimeError("GCP_PROJECT_ID is not configured")
 
     llm = build_llm(settings)
-    report_json = json.dumps(
-        report.model_dump(mode="json", exclude={"briefing"}),  # briefing is background only
-        ensure_ascii=False,
-        indent=2,
-    )
+    report_json = _publisher_report_json(report)
     verdict_json = json.dumps(
         verdict.model_dump(mode="json") if hasattr(verdict, "model_dump") else verdict,
         ensure_ascii=False,
@@ -2174,6 +2229,12 @@ def generate_facebook_post(
             "Napíš slovenský Facebook post podľa dodaných dát.\n\n"
             "PRAVIDLÁ:\n"
             "- Víťaza, red flag a skóre ber VÝLUČNE z DebateVerdict — neurčuj ich sám.\n"
+            "- Ak DebateVerdict.scoring_status nie je 'ok', víťaza nevyhlasuj a "
+            "jednou vetou uveď, že rečníkov sa nepodarilo spoľahlivo priradiť "
+            "k prepisu.\n"
+            "- Pri rečníkoch môžeš uviesť podiel slov medzi hosťami "
+            "(word_share_percent), počet prehovorov (turns), podstatné otázky a "
+            "vyhnutia (challenging_questions, questions_dodged) — iba z DebateVerdict.\n"
             "- Ak je winner prázdny, výsledok je nerozhodný. Nepíš, že niekto "
             "vyhral debatu. Uveď rozdiel (margin) a že ide o tesný fair-play výsledok.\n"
             "- Zobraz prehľadný scoreboard podľa disciplín z DebateVerdict "
