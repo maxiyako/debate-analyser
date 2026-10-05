@@ -59,7 +59,11 @@ def _verdict_line(verdict) -> str:
 @click.option(
     "--url",
     required=True,
-    help="STVR archive episode URL, e.g. https://www.stvr.sk/televizia/archiv/14036/<id>",
+    help=(
+        "Debate episode URL. Supported: STVR archive "
+        "(https://www.stvr.sk/televizia/archiv/...) or ta3 podcast article "
+        "(https://www.ta3.com/clanok/<id>/...) with a Transistor.fm embed."
+    ),
 )
 @click.option(
     "--skip-agents",
@@ -121,7 +125,10 @@ def main(
         logger.info("Using existing transcript %s", transcript_file)
     else:
         logger.info("=== Ingestion ===")
-        ep_id, _video, audio = ingest(url, settings=settings)
+        try:
+            ep_id, _video, audio = ingest(url, settings=settings)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
         logger.info("=== Transcription ===")
         transcript_file = run_transcription(audio, ep_id, settings=settings)
 
