@@ -34,13 +34,10 @@ class Settings(BaseSettings):
     # underlying HTTP client can hang indefinitely on a stalled response —
     # the process looks alive (idle socket, ~0% CPU) but never progresses.
     llm_timeout_s: float = 900.0
-    # Gemini 2.5 Pro counts thinking tokens against the output cap. With no
-    # cap and the default (dynamic) thinking budget, a long structured reply
-    # stops mid-JSON: correction batches raise EOF, and schema calls collapse
-    # to empty lists such as {"claims":[]}. 65536 is the 2.5 Pro output max.
-    # 128 is the smallest thinking budget 2.5 Pro accepts.
+    # Gemini 2.5 Pro counts thinking tokens against the output cap. Thinking
+    # stays dynamic (quality). 65536 is the 2.5 Pro output max, so a long
+    # structured reply has the full window instead of a lower client default.
     llm_max_output_tokens: int = 65536
-    llm_thinking_budget: int = 128
 
     # Fact pipeline
     # Cost fuse for the adaptive claim selection (was: a hard top-N cut).

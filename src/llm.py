@@ -32,20 +32,12 @@ def _client(settings: Settings) -> tuple[Any, Any]:
 
 
 def output_limit_kwargs(settings: Settings) -> dict[str, Any]:
-    """LiteLLM kwargs so thinking cannot consume the structured JSON.
+    """LiteLLM kwargs: raise the output ceiling, leave thinking dynamic.
 
-    CrewAI forwards ``max_tokens`` and ``additional_params`` on the completion
-    call. ``thinking.budget_tokens`` becomes Gemini ``thinkingBudget``.
+    CrewAI forwards ``max_tokens`` on the completion call. No thinking budget
+    is sent, so Gemini 2.5 Pro keeps its automatic budget.
     """
-    return {
-        "max_tokens": settings.llm_max_output_tokens,
-        "additional_params": {
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": settings.llm_thinking_budget,
-            },
-        },
-    }
+    return {"max_tokens": settings.llm_max_output_tokens}
 
 
 def generate_json(
@@ -71,9 +63,6 @@ def generate_json(
                 response_mime_type="application/json",
                 response_schema=schema,
                 max_output_tokens=settings.llm_max_output_tokens,
-                thinking_config=types.ThinkingConfig(
-                    thinking_budget=settings.llm_thinking_budget,
-                ),
             ),
         )
 

@@ -13,10 +13,9 @@ def _settings(**kw) -> Settings:
     return Settings(_env_file=None, **kw)
 
 
-def test_output_limits_leave_room_past_thinking() -> None:
+def test_output_limit_raises_cap_and_leaves_thinking_dynamic() -> None:
     kw = output_limit_kwargs(_settings())
-    assert kw["max_tokens"] == 65536
-    assert kw["additional_params"]["thinking"]["budget_tokens"] == 128
+    assert kw == {"max_tokens": 65536}
 
 
 def test_vertex_not_ready_without_project_id() -> None:
