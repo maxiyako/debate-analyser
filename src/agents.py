@@ -1994,6 +1994,15 @@ def run_analysis(
     pipeline_notes.extend(retry_notes)
     behavioral_raw = getattr(a_tasks["behavioral"].output, "raw", "") or ""
     moderator_raw = getattr(a_tasks["moderator"].output, "raw", "") or ""
+    from src.schema_repair import (
+        coerce_behavioral,
+        coerce_moderator,
+        for_critic,
+        restore_empty_sections,
+    )
+
+    behavioral_for_critic, behavioral_fixed = for_critic(behavioral_raw, coerce_behavioral)
+    moderator_for_critic, moderator_fixed = for_critic(moderator_raw, coerce_moderator)
 
     from src.questions import default_question_llm, run_question_audit
 
@@ -2046,7 +2055,10 @@ def run_analysis(
 
     # Phase C: critic review of behavioral/moderator sections.
     c_result, _ = kickoff_with_retry(
-        lambda: (build_critic_crew(working, behavioral_raw, moderator_raw, settings), None),
+        lambda: (
+            build_critic_crew(working, behavioral_for_critic, moderator_for_critic, settings),
+            None,
+        ),
         "critic",
     )
     TRACKER.add_crew("analysis_critic", c_result)
@@ -2062,6 +2074,12 @@ def run_analysis(
             report = AnalysisReport(
                 summary=raw[:4000], critic_notes=["Unstructured model output"]
             )
+
+    repair_notes = restore_empty_sections(report, behavioral_fixed, moderator_fixed)
+    for note in repair_notes:
+        logger.info(note)
+    if repair_notes:
+        report.critic_notes = [*report.critic_notes, *repair_notes]
 
     kept_extracted = ExtractedClaims(claims=kept_claims)
     facts, reconcile_notes = reconcile_checks(
