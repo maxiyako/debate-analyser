@@ -31,6 +31,23 @@ def _client(settings: Settings) -> tuple[Any, Any]:
     return client, types
 
 
+def output_limit_kwargs(settings: Settings) -> dict[str, Any]:
+    """LiteLLM kwargs so thinking cannot consume the structured JSON.
+
+    CrewAI forwards ``max_tokens`` and ``additional_params`` on the completion
+    call. ``thinking.budget_tokens`` becomes Gemini ``thinkingBudget``.
+    """
+    return {
+        "max_tokens": settings.llm_max_output_tokens,
+        "additional_params": {
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": settings.llm_thinking_budget,
+            },
+        },
+    }
+
+
 def generate_json(
     prompt: str,
     schema: type[T],
@@ -53,6 +70,10 @@ def generate_json(
                 temperature=temperature,
                 response_mime_type="application/json",
                 response_schema=schema,
+                max_output_tokens=settings.llm_max_output_tokens,
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=settings.llm_thinking_budget,
+                ),
             ),
         )
 

@@ -5,11 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from config import Settings
+from src.llm import output_limit_kwargs
 
 
 def _settings(**kw) -> Settings:
     # _env_file=None isolates the test from the developer's local .env.
     return Settings(_env_file=None, **kw)
+
+
+def test_output_limits_leave_room_past_thinking() -> None:
+    kw = output_limit_kwargs(_settings())
+    assert kw["max_tokens"] == 65536
+    assert kw["additional_params"]["thinking"]["budget_tokens"] == 128
 
 
 def test_vertex_not_ready_without_project_id() -> None:

@@ -307,6 +307,12 @@ def build_correction_prompt(
     )
 
 
+def _json_truncated(exc: BaseException) -> bool:
+    """True when the model stopped mid-JSON (output budget / thinking ate the reply)."""
+    text = str(exc)
+    return "EOF while parsing" in text or "json_invalid" in text
+
+
 def propose_corrections(
     lines: list[Line],
     *,
@@ -320,17 +326,35 @@ def propose_corrections(
     `apply_corrections`, so no index translation is needed; edits outside the
     chunk's own range are dropped and counted in a note (they never reach the
     applied log, so nothing else would show they were proposed).
+
+    A truncated JSON reply is not a finished chunk: split it and ask again so
+    those lines are still corrected. Any other error keeps the raw text.
     """
     edits: list[TranscriptEdit] = []
     notes: list[str] = []
-    for start in range(0, len(lines), CHUNK_LINES):
-        end = min(len(lines), start + CHUNK_LINES)
+
+    def collect(start: int, end: int) -> None:
         try:
             batch = llm(build_correction_prompt(lines, start, end, allowed_names, speaker_names))
         except Exception as exc:  # noqa: BLE001 - a failed chunk keeps its raw text
+            if end - start > 1 and _json_truncated(exc):
+                mid = start + (end - start) // 2
+                logger.warning(
+                    "Correction chunk %d-%d truncated; splitting at %d",
+                    start,
+                    end - 1,
+                    mid,
+                )
+                notes.append(
+                    f"Correction chunk #{start}-#{end - 1} returned truncated JSON; "
+                    f"split into #{start}-#{mid - 1} and #{mid}-#{end - 1}"
+                )
+                collect(start, mid)
+                collect(mid, end)
+                return
             logger.warning("Correction chunk %d-%d failed: %s", start, end - 1, exc)
             notes.append(f"Transcript correction chunk #{start}-#{end - 1} failed: {exc}"[:300])
-            continue
+            return
         in_chunk = [x for x in batch.edits if start <= x.line_no < end]
         outside = len(batch.edits) - len(in_chunk)
         if outside:
@@ -339,6 +363,9 @@ def propose_corrections(
                 "outside the chunk ignored"
             )
         edits.extend(in_chunk)
+
+    for start in range(0, len(lines), CHUNK_LINES):
+        collect(start, min(len(lines), start + CHUNK_LINES))
     return edits, notes
 
 

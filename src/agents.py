@@ -1030,6 +1030,8 @@ def build_llm(settings: Settings):
     os.environ["VERTEXAI_LOCATION"] = settings.gcp_location
     os.environ["GOOGLE_CLOUD_PROJECT"] = settings.gcp_project_id
 
+    from src.llm import output_limit_kwargs
+
     return RateLimitRetryLLM(
         model=f"vertex_ai/{settings.gemini_model}",
         temperature=0.2,
@@ -1038,6 +1040,7 @@ def build_llm(settings: Settings):
         # Without this, a stalled Vertex response hangs the whole run forever
         # instead of raising — see _is_transient_llm_error / _retry_on_rate_limit.
         timeout=settings.llm_timeout_s,
+        **output_limit_kwargs(settings),
     )
 
 

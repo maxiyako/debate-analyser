@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.correction import apply_corrections, check_edit, number_tokens
+from src.correction import (
+    CorrectionBatch,
+    apply_corrections,
+    check_edit,
+    number_tokens,
+    propose_corrections,
+)
 from src.report_models import EditType, TranscriptEdit
 from src.transcript_lines import format_lines, parse_lines
 
@@ -294,6 +300,47 @@ def test_propose_chunks_and_drops_out_of_range_edits() -> None:
         "Correction chunk #40-#79: 1 edit(s) outside the chunk ignored",
         "Correction chunk #80-#84: 1 edit(s) outside the chunk ignored",
     ]
+
+
+def test_truncated_json_chunk_is_split_and_retried() -> None:
+    lines = parse_lines(_many(40))
+    seen: list[str] = []
+
+    def fake(prompt: str) -> CorrectionBatch:
+        seen.append(prompt)
+        if "Edit only lines #0..#39" in prompt:
+            raise RuntimeError(
+                "Invalid JSON: EOF while parsing a value at line 287 column 0 "
+                "[type=json_invalid, input_value='{', input_type=str]"
+            )
+        if "Edit only lines #0..#19" in prompt:
+            return CorrectionBatch(edits=[TranscriptEdit(line_no=0, type=S, before="ľudi", after="ľudí")])
+        if "Edit only lines #20..#39" in prompt:
+            return CorrectionBatch(edits=[TranscriptEdit(line_no=20, type=S, before="ľudi", after="ľudí")])
+        raise AssertionError(prompt)
+
+    edits, notes = propose_corrections(
+        lines, llm=fake, allowed_names=set(), speaker_names={"Moderátor"}
+    )
+    assert [item.line_no for item in edits] == [0, 20]
+    assert any("truncated JSON" in note for note in notes)
+    assert sum("Edit only lines #0..#39" in prompt for prompt in seen) == 1
+
+
+def test_truncated_single_line_is_noted_not_split() -> None:
+    lines = parse_lines(_many(1))
+    calls = {"n": 0}
+
+    def fake(prompt: str) -> CorrectionBatch:
+        calls["n"] += 1
+        raise RuntimeError("EOF while parsing a value [type=json_invalid]")
+
+    edits, notes = propose_corrections(
+        lines, llm=fake, allowed_names=set(), speaker_names=set()
+    )
+    assert calls["n"] == 1
+    assert edits == []
+    assert len(notes) == 1 and notes[0].startswith("Transcript correction chunk #0-#0 failed")
 
 
 def test_failed_chunk_is_noted_and_skipped() -> None:
