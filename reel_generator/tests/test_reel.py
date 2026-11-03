@@ -355,12 +355,11 @@ def test_false_fact_pads_before_and_blinks_only_on_the_claim(tmp_path: Path):
     )
     assert result.clip_start <= result.stamp_at - 2.8
     assert result.clip_end >= result.stamp_at + 3.0
+    assert result.stamp_path is None
+    assert result.output_path.name.endswith(".hud.mp4")
     command = " ".join(result.command)
-    assert "mod(" in command
-    start = float(re.search(r"gte\(t\\,([0-9.]+)\)", command).group(1))
-    end = float(re.search(r"lte\(t\\,([0-9.]+)\)", command).group(1))
-    assert start >= 2.5
-    assert end < result.clip_end - result.clip_start - 0.3
+    assert "mod(" not in command
+    assert "y=70" not in command
 
 
 def test_small_face_drift_keeps_the_same_crop():
@@ -408,14 +407,15 @@ def test_dry_run_writes_ass_stamp_and_command(tmp_path: Path):
     )
     assert result.stamp_text == "UHNUTIE"
     assert result.ass_path.is_file()
-    assert result.stamp_path.is_file()
-    assert result.stamp_path.stat().st_size > 100
-    assert "overlay=" in " ".join(result.command)
+    assert result.stamp_path is None
+    assert result.output_path.name.endswith(".hud.mp4")
+    command = " ".join(result.command)
+    assert "y=70" not in command
+    assert "mod(" not in command
     assert result.rendered is False
     assert result.clip_start < result.stamp_at < result.clip_end
     text = result.ass_path.read_text(encoding="utf-8")
     assert "Dialogue:" in text
-    assert "mod(" in " ".join(result.command)
     starts = []
     for line in text.splitlines():
         if not line.startswith("Dialogue:"):

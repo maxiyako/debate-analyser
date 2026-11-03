@@ -1,4 +1,7 @@
-"""Orchestrate one reel: highlight -> clip -> karaoke ASS -> stamp -> MP4.
+"""Orchestrate one reel: highlight -> clip -> karaoke ASS -> match HUD -> MP4.
+
+A counted foul (lie, misleading claim, attack, dodge) gets the scoreboard
+instead of the blinking stamp. Other highlights still use the stamp.
 
     python -m reel_generator.generator \\
         --id 620752 \\
@@ -13,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -43,6 +47,13 @@ from reel_generator.render import (
     format_command,
     run_ffmpeg,
 )
+from reel_generator.scoreboard import (
+    board_for_highlight,
+    burn_hud,
+    collect_score_events,
+    render_hud,
+    scoreboard_applies,
+)
 from reel_generator.stamps import render_stamp
 from reel_generator.subtitles import generate_ass, render_caption_video
 from reel_generator.timeline import next_other_turn, plan_window, search_bounds, slice_words
@@ -60,7 +71,7 @@ class ReelResult:
     clip_end: float
     stamp_at: float
     ass_path: Path
-    stamp_path: Path
+    stamp_path: Path | None
     video_path: Path
     output_path: Path
     command: list[str]
@@ -82,11 +93,14 @@ def generate(
     engine: str = "argv",
     frame_with_llm: bool = True,
     hear: bool | None = None,
+    answer_speed: float | None = None,
 ) -> ReelResult:
     style = style or ReelStyle()
     data_dir = data_dir or DEFAULT_DATA_DIR
     report = load_report(find_report(data_dir, discussion_id))
     item = highlight_from_report(report, highlight, discussion_id)
+    if answer_speed is not None and item.outcome != "dodged":
+        raise ValueError("answer_speed is only for a dodged question")
     lines = load_transcript(find_transcript(data_dir, discussion_id))
     window_start, window_end = search_bounds(item)
     media = video or find_video(data_dir, discussion_id)
@@ -190,7 +204,10 @@ def generate(
         )
     captions = slice_words(words, reel.start, reel.end)
     ass_path = generate_ass(captions, out_dir / f"{item.slug}.ass", style)
-    stamp_path = render_stamp(item, out_dir / f"{item.slug}.png", style)
+    uses_board = scoreboard_applies(item)
+    stamp_path = None
+    if not uses_board:
+        stamp_path = render_stamp(item, out_dir / f"{item.slug}.png", style)
 
     video_ready = media is not None and media.is_file()
     video_path = media if video_ready else expected_video(data_dir, discussion_id)
@@ -221,7 +238,8 @@ def generate(
         has_audio=has_audio,
         blink=blink,
     )
-    destination = out_dir / f"{item.slug}.mp4"
+    picture = out_dir / f"{item.slug}.mp4"
+    destination = out_dir / f"{item.slug}.hud.mp4" if uses_board else picture
     caption_video = None
     use_ass = ffmpeg_has_filter("ass") or ffmpeg_has_filter("subtitles")
     if engine == "argv" and not use_ass and not dry_run and video_ready:
@@ -234,10 +252,10 @@ def generate(
             captions, out_dir / f"{item.slug}.captions.mov", style, reel.duration
         )
     if engine == "ffmpeg-python":
-        command = build_with_ffmpeg_python(video_path, ass_path, destination, **common)
+        command = build_with_ffmpeg_python(video_path, ass_path, picture, **common)
     elif engine == "argv":
         command = build_ffmpeg_command(
-            video_path, ass_path, destination, caption_video=caption_video, **common
+            video_path, ass_path, picture, caption_video=caption_video, **common
         )
     else:
         raise ValueError(f"unknown engine {engine!r}")
@@ -250,6 +268,20 @@ def generate(
                 "ASS, stamp, and the ffmpeg command were still written."
             )
         run_ffmpeg(command)
+        if uses_board:
+            events = collect_score_events(report, lines, discussion_id)
+            board = board_for_highlight(events, item, report)
+            with tempfile.TemporaryDirectory(prefix="hud-") as raw:
+                frames = render_hud(board, Path(raw), style)
+                burn_hud(
+                    picture,
+                    destination,
+                    frames,
+                    stamp_start=stamp_start,
+                    stamp_end=stamp_end,
+                    style=style,
+                    answer_speed=answer_speed,
+                )
         rendered = True
 
     return ReelResult(
@@ -298,7 +330,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-duration", type=float, default=None)
     parser.add_argument("--font", default=None, help="ASS font name, e.g. 'Montserrat Black'.")
     parser.add_argument("--highlight-color", default=None, help="ASS colour &H00BBGGRR, default yellow.")
-    parser.add_argument("--dry-run", action="store_true", help="Write ASS + PNG and print ffmpeg. Do not encode.")
+    parser.add_argument("--dry-run", action="store_true", help="Write the ASS and print ffmpeg. Do not encode.")
+    parser.add_argument(
+        "--answer-speed",
+        type=float,
+        default=None,
+        help="Dodge reels only. Play the answer at this speed after the flag (2.5 is the match pace).",
+    )
     parser.add_argument("--no-llm", action="store_true", help="Skip the one framing call. Use the default answer length.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -336,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             engine=args.engine,
             frame_with_llm=not args.no_llm,
+            answer_speed=args.answer_speed,
         )
     except (FileNotFoundError, KeyError, IndexError, ValueError, TypeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -346,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"stamp:     {result.stamp_text} at {result.stamp_at:.2f}s")
     print(f"clip:      {result.clip_start:.2f}s -> {result.clip_end:.2f}s")
     print(f"ass:       {result.ass_path}")
-    print(f"png:       {result.stamp_path}")
+    print(f"png:       {result.stamp_path or '(scoreboard, no stamp)'}")
     print(f"video:     {result.video_path}")
     print(f"output:    {result.output_path}")
     print(format_command(result.command))

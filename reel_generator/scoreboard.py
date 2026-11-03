@@ -75,6 +75,15 @@ class HudFrames:
     flash: Path
 
 
+def scoreboard_applies(highlight: Highlight) -> bool:
+    """True when the match panel, not the blinking stamp, marks this highlight."""
+    try:
+        category_of(highlight)
+    except ValueError:
+        return False
+    return True
+
+
 def category_of(highlight: Highlight) -> tuple[str, str, str]:
     key = (highlight.kind, highlight.outcome if highlight.kind == "fact" or highlight.outcome == "dodged" else "")
     if highlight.kind == "incivility":
