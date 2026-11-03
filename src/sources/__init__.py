@@ -5,10 +5,12 @@ from __future__ import annotations
 from src.sources.base import MediaSource
 from src.sources.stvr import StvrSource
 from src.sources.ta3 import Ta3PodcastSource
+from src.sources.youtube import YoutubeSource
 
 SOURCES: list[MediaSource] = [
     StvrSource(),
     Ta3PodcastSource(),
+    YoutubeSource(),
 ]
 
 

@@ -1,0 +1,6 @@
+output/
+*.mp4
+*.mov
+*.wav
+*.ffmpeg.log
+face_*.jpg

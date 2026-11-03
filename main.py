@@ -61,8 +61,9 @@ def _verdict_line(verdict) -> str:
     required=True,
     help=(
         "Debate episode URL. Supported: STVR archive "
-        "(https://www.stvr.sk/televizia/archiv/...) or ta3 podcast article "
-        "(https://www.ta3.com/clanok/<id>/...) with a Transistor.fm embed."
+        "(https://www.stvr.sk/televizia/archiv/...), ta3 podcast article "
+        "(https://www.ta3.com/clanok/<id>/...) with a Transistor.fm embed, "
+        "or YouTube (https://www.youtube.com/watch?v=... / https://youtu.be/...)."
     ),
 )
 @click.option(

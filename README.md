@@ -34,6 +34,9 @@ Accept [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speake
 python main.py --url "https://www.stvr.sk/televizia/archiv/14036/<episode-id>"
 python main.py --url "https://www.ta3.com/clanok/1074913/v-politike-tomas-taraba-vs-michal-simecka" \
   --guests "Tomáš Taraba;Michal Šimečka" --moderator "Braňo Král"
+python main.py --url "https://www.youtube.com/watch?v=<video-id>" \
+  --debate-date 2026-10-06 \
+  --guests "Diana Javorcikova;Jan Nosko" --moderator "Michal Kovacic"
 # skip agents (transcription only)
 python main.py --url "..." --skip-agents
 ```
@@ -46,7 +49,7 @@ Outputs:
 
 ## Architecture
 
-1. **Ingestion** — source adapters (`stvr` via yt-dlp, `ta3` via Transistor mp3 scrape) → ffmpeg 16 kHz mono WAV
+1. **Ingestion** — source adapters (`stvr` and `youtube` via yt-dlp, `ta3` via Transistor mp3 scrape) → ffmpeg 16 kHz mono WAV
 2. **Transcription** — Pyannote diarization + `kinit/whisper-large-v3-sk` → merged lines
 3. **Speaker map** — diarization labels (`Speaker A`) are resolved to real people in code (turn-taking heuristics + one small validated LLM call); pass the roster with `--guests "Erik Tomáš;Marián Viskupič"` and `--moderator "<name>"`. An uncertain map degrades scoring instead of guessing names.
 4. **Transcript correction** — the LLM only proposes small edits (spelling, word boundaries, known names, punctuation, turn splits); code applies them only when numbers, negation, and content words stay invariant, and logs every decision.

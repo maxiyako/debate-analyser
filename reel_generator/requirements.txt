@@ -1,0 +1,10 @@
+# Standalone. Do not add these to the analyzer requirements.
+ffmpeg-python>=0.2.0
+Pillow>=10.0.0
+
+# Optional fast hearing path. Without it, captions are still locked to the
+# clip audio via the local transformers Whisper (models/whisper-large-v3-sk).
+# mlx-whisper
+# whisperx
+# stable-ts
+# opencv-python

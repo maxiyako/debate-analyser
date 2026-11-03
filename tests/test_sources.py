@@ -7,6 +7,7 @@ import pytest
 from src.sources.base import MediaSource, normalize_host
 from src.sources import resolve, SOURCES
 from src.sources.stvr import StvrSource
+from src.sources.youtube import YoutubeSource
 
 
 def test_normalize_host_strips_www() -> None:
@@ -174,3 +175,25 @@ def test_ingest_uses_resolved_source(tmp_path, monkeypatch) -> None:
     assert audio_path == wav
     fake_source.download.assert_called_once()
     extract.assert_called_once_with(media, settings=settings)
+
+
+def test_youtube_matches_and_episode_id() -> None:
+    src = YoutubeSource()
+    url = "https://www.youtube.com/watch?v=aSjfPvdYVoI"
+    assert src.matches(url) is True
+    assert src.matches("https://youtu.be/aSjfPvdYVoI") is True
+    assert src.matches("https://m.youtube.com/watch?v=aSjfPvdYVoI&t=12s") is True
+    assert src.episode_id(url) == "aSjfPvdYVoI"
+    assert src.episode_id("https://youtu.be/aSjfPvdYVoI?t=3") == "aSjfPvdYVoI"
+    assert src.matches("https://www.stvr.sk/televizia/archiv/621954") is False
+
+
+def test_youtube_rejects_url_without_video_id() -> None:
+    src = YoutubeSource()
+    with pytest.raises(ValueError, match="Cannot parse YouTube video id"):
+        src.episode_id("https://www.youtube.com/feed/subscriptions")
+
+
+def test_resolve_youtube_url() -> None:
+    source = resolve("https://www.youtube.com/watch?v=aSjfPvdYVoI")
+    assert source.name == "youtube"
