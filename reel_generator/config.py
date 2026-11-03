@@ -27,6 +27,9 @@ class ReelStyle:
     max_gap_s: float = 0.45
     primary_ass: str = "&H00FFFFFF"  # white, words not currently spoken
     highlight_ass: str = "&H0000FFFF"  # #FFFF00, the spoken word
+    # Flagged line only. Light red for the rest of that line, red for the word being said.
+    flag_primary_ass: str = "&H008080FF"  # #FF8080
+    flag_highlight_ass: str = "&H000000FF"  # #FF0000
     outline_ass: str = "&H00000000"
     shadow_ass: str = "&H78000000"
     outline: int = 8

@@ -203,11 +203,20 @@ def generate(
             device=device,
         )
     captions = slice_words(words, reel.start, reel.end)
-    ass_path = generate_ass(captions, out_dir / f"{item.slug}.ass", style)
     uses_board = scoreboard_applies(item)
     stamp_path = None
     if not uses_board:
         stamp_path = render_stamp(item, out_dir / f"{item.slug}.png", style)
+    stamp_start = max(0.0, reel.stamp_at - reel.start)
+    flag_end = reel.flag_end if reel.flag_end > reel.stamp_at else reel.end
+    stamp_end = min(reel.duration, max(stamp_start + 0.4, flag_end - reel.start))
+    ass_path = generate_ass(
+        captions,
+        out_dir / f"{item.slug}.ass",
+        style,
+        flag_start=stamp_start,
+        flag_end=stamp_end,
+    )
 
     video_ready = media is not None and media.is_file()
     video_path = media if video_ready else expected_video(data_dir, discussion_id)
@@ -224,9 +233,6 @@ def generate(
     if video_ready:
         has_audio = probe_media(media).has_audio
     blink = True
-    stamp_start = max(0.0, reel.stamp_at - reel.start)
-    flag_end = reel.flag_end if reel.flag_end > reel.stamp_at else reel.end
-    stamp_end = min(reel.duration, max(stamp_start + 0.4, flag_end - reel.start))
     common = dict(
         clip_start=reel.start,
         duration=reel.duration,
@@ -249,7 +255,12 @@ def generate(
             "The .ass file is still written for an ffmpeg built with libass."
         )
         caption_video = render_caption_video(
-            captions, out_dir / f"{item.slug}.captions.mov", style, reel.duration
+            captions,
+            out_dir / f"{item.slug}.captions.mov",
+            style,
+            reel.duration,
+            flag_start=stamp_start,
+            flag_end=stamp_end,
         )
     if engine == "ffmpeg-python":
         command = build_with_ffmpeg_python(video_path, ass_path, picture, **common)

@@ -1,8 +1,10 @@
 """Hormozi-style karaoke captions as Advanced SubStation Alpha.
 
 Only the word being spoken is yellow. Earlier words in the same 3-word chunk
-stay white. Standard ASS `\\k` would leave already-sung words filled, so each
-chunk is one Dialogue event per word, with that word recoloured.
+stay white. During the flagged line the palette switches: the word being said
+is red, and the words still ahead in that line are light red. Standard ASS
+`\\k` would leave already-sung words filled, so each chunk is one Dialogue
+event per word, with that word recoloured.
 """
 
 from __future__ import annotations
@@ -26,11 +28,16 @@ def generate_ass(
     words: list[Word],
     destination: Path,
     style: ReelStyle | None = None,
+    *,
+    flag_start: float | None = None,
+    flag_end: float | None = None,
 ) -> Path:
     """Write an `.ass` file. `words` are already clip-relative seconds."""
     style = style or ReelStyle()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    events = [_dialogue(cue, style) for cue in caption_cues(words, style)]
+    events = [
+        _dialogue(cue, style, flag_start, flag_end) for cue in caption_cues(words, style)
+    ]
     destination.write_text(_header(style) + "".join(events), encoding="utf-8")
     return destination
 
@@ -55,6 +62,9 @@ def render_caption_video(
     destination: Path,
     style: ReelStyle,
     duration: float,
+    *,
+    flag_start: float | None = None,
+    flag_end: float | None = None,
 ) -> Path:
     """Burn the same karaoke cues into a transparent movie.
 
@@ -112,7 +122,15 @@ def render_caption_video(
                 elif cue_index in drawn:
                     raw = drawn[cue_index]
                 else:
-                    image = _draw_cue(cues[cue_index], style, font, active_font, ImageDraw)
+                    image = _draw_cue(
+                        cues[cue_index],
+                        style,
+                        font,
+                        active_font,
+                        ImageDraw,
+                        flag_start,
+                        flag_end,
+                    )
                     raw = image.tobytes()
                     drawn[cue_index] = raw
                 proc.stdin.write(raw)
@@ -150,8 +168,13 @@ def _header(style: ReelStyle) -> str:
     )
 
 
-def _dialogue(cue: CaptionCue, style: ReelStyle) -> str:
-    text = _chunk_text(cue.words, cue.active, style)
+def _dialogue(
+    cue: CaptionCue,
+    style: ReelStyle,
+    flag_start: float | None,
+    flag_end: float | None,
+) -> str:
+    text = _chunk_text(cue.words, cue.active, style, flag_start, flag_end)
     return (
         f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Reel,,0,0,0,,{text}\n"
     )
@@ -178,21 +201,50 @@ def _chunks(words: list[Word], style: ReelStyle) -> list[list[Word]]:
     return chunks
 
 
-def _chunk_text(chunk: list[Word], active: int, style: ReelStyle) -> str:
+def _chunk_text(
+    chunk: list[Word],
+    active: int,
+    style: ReelStyle,
+    flag_start: float | None = None,
+    flag_end: float | None = None,
+) -> str:
     x = style.width // 2
     parts = [f"{{\\an5\\pos({x},{style.subtitle_y})}}"]
     for index, word in enumerate(chunk):
         token = _escape(word.text.strip())
+        colour = _word_colour(index, active, word, style, flag_start, flag_end)
         if index == active:
             parts.append(
-                f"{{\\fscx{style.active_scale}\\fscy{style.active_scale}"
-                f"\\c{style.highlight_ass}}}{token}"
+                f"{{\\fscx{style.active_scale}\\fscy{style.active_scale}\\c{colour}}}{token}"
             )
         else:
-            parts.append(f"{{\\fscx100\\fscy100\\c{style.primary_ass}}}{token}")
+            parts.append(f"{{\\fscx100\\fscy100\\c{colour}}}{token}")
         if index + 1 < len(chunk):
             parts.append(" ")
     return "".join(parts)
+
+
+def _word_colour(
+    index: int,
+    active: int,
+    word: Word,
+    style: ReelStyle,
+    flag_start: float | None,
+    flag_end: float | None,
+) -> str:
+    """Yellow and white, except on the flagged line: red and light red."""
+    flagged = _in_flag(word, flag_start, flag_end)
+    if index == active:
+        return style.flag_highlight_ass if flagged else style.highlight_ass
+    if flagged and index > active:
+        return style.flag_primary_ass
+    return style.primary_ass
+
+
+def _in_flag(word: Word, flag_start: float | None, flag_end: float | None) -> bool:
+    if flag_start is None or flag_end is None:
+        return False
+    return flag_start <= word.start < flag_end
 
 
 def _ass_time(seconds: float) -> str:
@@ -210,7 +262,15 @@ def _cue_index(cues: list[CaptionCue], moment: float) -> int | None:
     return None
 
 
-def _draw_cue(cue: CaptionCue, style: ReelStyle, font, active_font, image_draw) -> object:
+def _draw_cue(
+    cue: CaptionCue,
+    style: ReelStyle,
+    font,
+    active_font,
+    image_draw,
+    flag_start: float | None = None,
+    flag_end: float | None = None,
+) -> object:
     from PIL import Image
 
     image = Image.new("RGBA", (style.width, style.height), (0, 0, 0, 0))
@@ -225,7 +285,10 @@ def _draw_cue(cue: CaptionCue, style: ReelStyle, font, active_font, image_draw) 
     x = (style.width - total) / 2
     for index, (token, face, width, height) in enumerate(pieces):
         y = style.subtitle_y - height / 2
-        fill = (255, 255, 0, 255) if index == cue.active else (255, 255, 255, 255)
+        colour = _word_colour(
+            index, cue.active, cue.words[index], style, flag_start, flag_end
+        )
+        fill = _ass_rgba(colour)
         draw.text((x + 4, y + 4), token, font=face, fill=(0, 0, 0, 170))
         draw.text(
             (x, y),
@@ -237,6 +300,17 @@ def _draw_cue(cue: CaptionCue, style: ReelStyle, font, active_font, image_draw) 
         )
         x += width + gap
     return image
+
+
+def _ass_rgba(colour: str) -> tuple[int, int, int, int]:
+    """ASS &HAABBGGRR to Pillow RGBA. ASS alpha 00 is opaque."""
+    raw = colour.removeprefix("&H").removeprefix("&h")
+    value = int(raw, 16)
+    alpha = 255 - ((value >> 24) & 255)
+    blue = (value >> 16) & 255
+    green = (value >> 8) & 255
+    red = value & 255
+    return (red, green, blue, alpha)
 
 
 def _pil_font(image_font, font_file: Path | None, size: int):

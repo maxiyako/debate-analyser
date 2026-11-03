@@ -233,11 +233,11 @@ def burn_hud(
     style: ReelStyle | None = None,
     answer_speed: float | None = None,
 ) -> None:
-    """Overlay the HUD on a finished reel. Score swaps when the stamp first blinks.
+    """Overlay the HUD on a finished reel. Score swaps when the flagged line starts.
 
     The bar blinks yellow for one second from that moment, then holds the new
-    score. The sticker keeps its own blink. The last 3 seconds are a blurred
-    end card. `answer_speed` plays the dodge answer (from the stamp on) faster.
+    score. The last 3 seconds are a blurred end card. `answer_speed` plays a
+    dodge answer (from the flag on) faster.
     """
     style = style or ReelStyle()
     duration = _duration(video)
@@ -247,7 +247,7 @@ def burn_hud(
         content = duration
         answer_speed = None
     total = content + _END_CARD_S
-    # Banner only. One second, twice the stamp's blink rate, then locked.
+    # Banner only. One second, twice the old stamp rate, then locked.
     period = (style.blink_on_s + style.blink_off_s) / 2
     on = style.blink_on_s / 2
     start = f"{stamp_start:.3f}"

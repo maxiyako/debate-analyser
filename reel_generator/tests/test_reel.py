@@ -117,6 +117,30 @@ def test_ass_highlights_only_current_word_and_caps_chunk_size(tmp_path: Path):
     assert dialogues[0].index("Očakávate") < dialogues[0].index("\\c&H00FFFFFF")
 
 
+def test_flagged_line_is_red_and_upcoming_words_are_light_red(tmp_path: Path):
+    words = [
+        Word("pred", 0.0, 0.4, "A"),
+        Word("lož", 1.0, 1.4, "A"),
+        Word("ďalej", 1.4, 1.8, "A"),
+        Word("stále", 1.8, 2.2, "A"),
+    ]
+    path = generate_ass(
+        words, tmp_path / "clip.ass", ReelStyle(), flag_start=1.0, flag_end=3.0
+    )
+    dialogues = [
+        line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("Dialogue:")
+    ]
+    assert "\\c&H0000FFFF}pred" in dialogues[0]
+    assert "&H000000FF" not in dialogues[0]
+    assert "\\c&H000000FF}lož" in dialogues[1]
+    assert "\\c&H008080FF}ďalej" in dialogues[1]
+    assert "\\c&H008080FF}stále" in dialogues[1]
+    # Already said words on the flagged line stay white. The word being said is red.
+    assert "\\c&H00FFFFFF}lož" in dialogues[2]
+    assert "\\c&H000000FF}ďalej" in dialogues[2]
+    assert "\\c&H008080FF}stále" in dialogues[2]
+
+
 def test_ffmpeg_graph_crops_overlays_and_burns_ass(tmp_path: Path):
     from reel_generator.crop import CropPlan
 
