@@ -87,9 +87,6 @@ class Settings(BaseSettings):
     asr_overlap_seconds: float = 5.0
     # Turn slices transcribed per Whisper generate() batch (throughput vs memory).
     asr_batch_size: int = 4
-    # Flag a line as cross-talk when a second speaker overlaps at least this
-    # fraction of the segment's duration.
-    crosstalk_min_overlap: float = 0.35
     # Overlap separation: two-speaker regions are split into one stream per
     # speaker and transcribed separately. Off until the overlap gold gate passes.
     overlap_separation_enabled: bool = False

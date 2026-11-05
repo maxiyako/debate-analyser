@@ -6,10 +6,22 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+import numpy as np
 
 from config import Settings, get_settings
 from src.gcs import upload_file
-from src.overlap import Turn
+from src.overlap import (
+    SR,
+    OverlapTools,
+    Region,
+    Turn,
+    find_overlap_regions,
+    log_summary,
+    process_regions,
+    trim_spans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +32,9 @@ class Segment:
     end: float
     text: str
     speaker: str = "SPEAKER_00"
-    crosstalk: bool = False  # another speaker substantially overlaps this segment
+    crosstalk: bool = False  # another speaker talks at the same time
+    region: int | None = None
+    rank: int = 0
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -157,168 +171,183 @@ def _chunk_spans(start: float, end: float, max_len: float = 28.0) -> list[tuple[
     return spans or [(start, end)]
 
 
-def transcribe(
-    audio_path: Path,
-    settings: Settings,
-    *,
-    diar_turns: list[tuple[float, float, str]] | None = None,
-    batch_size: int | None = None,
-) -> list[tuple[float, float, str]]:
-    """Diarization-guided ASR: transcribe each speaker turn's audio slice.
+MIN_SLICE_SECONDS = 0.3
 
-    This model does not reliably emit Whisper timestamp tokens, and word-level
-    timestamps via cross-attention DTW (return_token_timestamps) are ~7x slower
-    on MPS. Instead we transcribe the audio slice of each (merged) diarization
-    turn directly, so speaker attribution is exact by construction. Slices are
-    batched through a single plain generate() call for throughput. When no
-    diarization is available we fall back to coarse fixed 30s windows.
-    """
+
+def load_audio(audio_path: Path) -> np.ndarray:
     import soundfile as sf
-    import torch
-    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-
-    device = _resolve_device(settings)
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    model_id = settings.whisper_model_id
-
-    logger.info("Loading Whisper model %s on %s (dtype=%s)", model_id, device, dtype)
-    load_kwargs: dict = {}
-    if settings.huggingface_token and not Path(model_id).exists():
-        load_kwargs["token"] = settings.huggingface_token
-
-    processor = AutoProcessor.from_pretrained(model_id, **load_kwargs)
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id,
-        dtype=dtype,
-        low_cpu_mem_usage=True,
-        **load_kwargs,
-    )
-    model.to(device)
-    model.eval()
 
     audio, sr = sf.read(str(audio_path), dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
-    if sr != 16000:
+    if sr != SR:
         raise RuntimeError(f"Expected 16 kHz WAV, got {sr} Hz — re-extract audio")
-    total_s = len(audio) / sr
+    return audio
 
-    if diar_turns:
-        spans: list[tuple[float, float]] = []
-        for start, end, _spk in _merge_turns(diar_turns):
-            spans.extend(_chunk_spans(start, min(end, total_s)))
-    else:
-        logger.warning("No diarization turns — falling back to coarse 30s windows")
-        spans = [(s, min(total_s, s + 30.0)) for s in _window_starts(total_s, 30.0, 30.0)]
 
-    spans = [(s, min(e, total_s)) for s, e in spans if (e - s) >= 0.3]
-    bs = batch_size or settings.asr_batch_size
-    logger.info(
-        "Transcribing %.1f min audio in %d turn slices (batch %d)",
-        total_s / 60.0,
-        len(spans),
-        bs,
-    )
+class ASR(Protocol):
+    def transcribe(self, chunks: list[np.ndarray]) -> list[str]: ...
 
-    segments: list[tuple[float, float, str]] = []
-    for b in range(0, len(spans), bs):
-        batch = spans[b : b + bs]
-        chunks = [audio[int(s * sr) : int(e * sr)] for s, e in batch]
-        inputs = processor(
-            chunks, sampling_rate=16000, return_tensors="pt", return_attention_mask=True
+
+class WhisperASR:
+    """Batched Slovak Whisper over in-memory audio chunks.
+
+    This model does not reliably emit Whisper timestamp tokens, and word-level
+    timestamps via cross-attention DTW are ~7x slower on MPS, so each chunk is
+    one diarization slice or separated stream and its speaker is known upfront.
+    """
+
+    def __init__(self, settings: Settings, batch_size: int | None = None) -> None:
+        import torch
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+        self._torch = torch
+        self.device = _resolve_device(settings)
+        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+        model_id = settings.whisper_model_id
+        logger.info("Loading Whisper model %s on %s (dtype=%s)", model_id, self.device, self.dtype)
+        load_kwargs: dict = {}
+        if settings.huggingface_token and not Path(model_id).exists():
+            load_kwargs["token"] = settings.huggingface_token
+        self.processor = AutoProcessor.from_pretrained(model_id, **load_kwargs)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, dtype=self.dtype, low_cpu_mem_usage=True, **load_kwargs
         )
-        input_features = inputs.input_features.to(device=device, dtype=dtype)
-        attention_mask = inputs.attention_mask.to(device=device)
-        with torch.inference_mode():
-            predicted = model.generate(
-                input_features,
-                attention_mask=attention_mask,
-                language="slovak",
-                task="transcribe",
-                no_repeat_ngram_size=3,
+        self.model.to(self.device)
+        self.model.eval()
+        self.batch_size = batch_size or settings.asr_batch_size
+
+    def transcribe(self, chunks: list[np.ndarray]) -> list[str]:
+        torch = self._torch
+        texts: list[str] = []
+        bs = self.batch_size
+        for b in range(0, len(chunks), bs):
+            batch = chunks[b : b + bs]
+            inputs = self.processor(
+                batch, sampling_rate=SR, return_tensors="pt", return_attention_mask=True
             )
-        texts = processor.batch_decode(predicted, skip_special_tokens=True)
-        for (s, e), text in zip(batch, texts):
-            text = text.strip()
-            if text:
-                segments.append((s, e, text))
+            features = inputs.input_features.to(device=self.device, dtype=self.dtype)
+            mask = inputs.attention_mask.to(device=self.device)
+            with torch.inference_mode():
+                predicted = self.model.generate(
+                    features,
+                    attention_mask=mask,
+                    language="slovak",
+                    task="transcribe",
+                    no_repeat_ngram_size=3,
+                )
+            texts.extend(t.strip() for t in self.processor.batch_decode(predicted, skip_special_tokens=True))
+            done = min(b + bs, len(chunks))
+            if done % (bs * 5) == 0 or done == len(chunks):
+                logger.info("ASR progress %d/%d (%.0f%%)", done, len(chunks), 100.0 * done / len(chunks))
+        return texts
 
-        done = min(b + bs, len(spans))
-        if done % (bs * 5) == 0 or done == len(spans):
-            logger.info(
-                "ASR progress %d/%d (%.0f%%), %d segments so far",
-                done,
-                len(spans),
-                100.0 * done / len(spans),
-                len(segments),
-            )
+    def close(self) -> None:
+        del self.model
+        if self.device == "mps":
+            self._torch.mps.empty_cache()
 
-    del model
-    if device == "mps":
-        torch.mps.empty_cache()
 
-    segments.sort(key=lambda s: s[0])
+def clean_spans(exclusive_turns: list[Turn], total_s: float, regions: list[Region]) -> list[Turn]:
+    spans: list[Turn] = []
+    for start, end, speaker in trim_spans(_merge_turns(exclusive_turns), regions):
+        for s, e in _chunk_spans(start, min(end, total_s)):
+            if e - s >= MIN_SLICE_SECONDS:
+                spans.append((s, e, speaker))
+    return spans
+
+
+def _clip(spans: list[Turn], window: tuple[float, float] | None) -> list[Turn]:
+    if window is None:
+        return spans
+    w0, w1 = window
+    out: list[Turn] = []
+    for s, e, speaker in spans:
+        s, e = max(s, w0), min(e, w1)
+        if e - s >= MIN_SLICE_SECONDS:
+            out.append((s, e, speaker))
+    return out
+
+
+def build_segments(
+    audio: np.ndarray,
+    diar: Diarization,
+    settings: Settings,
+    asr: ASR,
+    *,
+    tools: OverlapTools | None = None,
+    window: tuple[float, float] | None = None,
+) -> list[Segment]:
+    """Speaker-tagged ASR segments: clean slices, fallback slices, separated streams."""
+    total_s = len(audio) / SR
+    pending: list[tuple[np.ndarray, Segment]] = []
+
+    def slice_of(s: float, e: float) -> np.ndarray:
+        return audio[int(s * SR) : int(e * SR)]
+
+    if not diar.exclusive_turns:
+        logger.warning("No diarization turns — falling back to coarse 30s windows")
+        spans = [(s, min(total_s, s + 30.0), "SPEAKER_00") for s in _window_starts(total_s, 30.0, 30.0)]
+        for s, e, speaker in _clip(spans, window):
+            pending.append((slice_of(s, e), Segment(s, e, "", speaker)))
+    else:
+        regions: list[Region] = []
+        results = []
+        if tools is not None:
+            regions = find_overlap_regions(diar.turns, min_seconds=settings.overlap_min_seconds)
+            if window is not None:
+                regions = [r for r in regions if r.start >= window[0] and r.end <= window[1]]
+            results = process_regions(audio, regions, diar.turns, settings, tools)
+            log_summary(results)
+
+        for s, e, speaker in _clip(clean_spans(diar.exclusive_turns, total_s, regions), window):
+            pending.append((slice_of(s, e), Segment(s, e, "", speaker)))
+
+        for res in results:
+            r = res.region
+            if res.reason is None:
+                for speaker, stream in res.streams.items():
+                    rank = 0 if speaker == res.lead else 1
+                    pending.append(
+                        (stream, Segment(r.start, r.end, "", speaker, True, r.group, rank))
+                    )
+                continue
+            for s, e, speaker in diar.exclusive_turns:
+                s, e = max(s, r.start), min(e, r.end)
+                if e - s >= MIN_SLICE_SECONDS:
+                    rank = 0 if speaker == res.lead else 1
+                    pending.append((slice_of(s, e), Segment(s, e, "", speaker, True, r.group, rank)))
+
+    texts = asr.transcribe([chunk for chunk, _ in pending])
+    segments: list[Segment] = []
+    for (_, seg), text in zip(pending, texts):
+        if text:
+            seg.text = text
+            segments.append(seg)
+    segments.sort(key=lambda seg: (seg.start, seg.rank))
     logger.info("ASR produced %d segments", len(segments))
     return segments
 
 
-def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
-    return max(0.0, min(a1, b1) - max(a0, b0))
-
-
-def _assign_speaker(
-    start: float,
-    end: float,
-    diar_turns: list[tuple[float, float, str]],
-    crosstalk_min: float,
-) -> tuple[str, bool]:
-    """Dominant diarization speaker for a segment + whether a 2nd speaker overlaps it."""
-    per_speaker: dict[str, float] = {}
-    for d_start, d_end, speaker in diar_turns:
-        ov = _overlap(start, end, d_start, d_end)
-        if ov > 0.0:
-            per_speaker[speaker] = per_speaker.get(speaker, 0.0) + ov
-    if not per_speaker:
-        return "SPEAKER_00", False
-    ordered = sorted(per_speaker.items(), key=lambda kv: -kv[1])
-    best_speaker = ordered[0][0]
-    second_ov = ordered[1][1] if len(ordered) > 1 else 0.0
-    duration = max(1e-6, end - start)
-    return best_speaker, (second_ov / duration) >= crosstalk_min
-
-
-def merge_diarization_and_asr(
-    asr_segments: list[tuple[float, float, str]],
-    diar_turns: list[tuple[float, float, str]],
-    *,
-    crosstalk_min: float = 0.35,
-    max_gap_seconds: float = 2.0,
-) -> list[Segment]:
-    """Assign a speaker per ASR segment, then merge consecutive same-speaker turns."""
+def merge_segments(segments: list[Segment], max_gap_seconds: float = 2.0) -> list[Segment]:
+    """Relabel to Speaker A.. and merge consecutive same-speaker segments."""
     label_map: dict[str, str] = {}
     merged: list[Segment] = []
-
-    for start, end, text in asr_segments:
-        raw_speaker, crosstalk = _assign_speaker(start, end, diar_turns, crosstalk_min)
-        label = _speaker_label(raw_speaker, label_map)
+    for seg in segments:
+        label = _speaker_label(seg.speaker, label_map)
+        prev = merged[-1] if merged else None
         if (
-            merged
-            and merged[-1].speaker == label
-            and start - merged[-1].end <= max_gap_seconds
+            prev is not None
+            and prev.speaker == label
+            and prev.crosstalk == seg.crosstalk
+            and prev.region == seg.region
+            and seg.start - prev.end <= max_gap_seconds
         ):
-            prev = merged[-1]
-            prev.text = f"{prev.text} {text}".strip()
-            prev.end = end
-            prev.crosstalk = prev.crosstalk or crosstalk
+            prev.text = f"{prev.text} {seg.text}".strip()
+            prev.end = max(prev.end, seg.end)
         else:
             merged.append(
-                Segment(
-                    start=start,
-                    end=end,
-                    text=text,
-                    speaker=label,
-                    crosstalk=crosstalk,
-                )
+                Segment(seg.start, seg.end, seg.text, label, seg.crosstalk, seg.region, seg.rank)
             )
     return merged
 
@@ -346,10 +375,13 @@ def run_transcription(audio_path: Path, episode_id: str, settings: Settings | No
         diar_cache.write_text(json.dumps(diar_turns), encoding="utf-8")
         logger.info("Cached diarization -> %s", diar_cache)
 
-    asr_segments = transcribe(audio_path, settings, diar_turns=diar_turns)
-    merged = merge_diarization_and_asr(
-        asr_segments, diar_turns, crosstalk_min=settings.crosstalk_min_overlap
-    )
+    diar = Diarization(settings.diarization_model_id, diar_turns, diar_turns)
+    asr = WhisperASR(settings)
+    try:
+        raw = build_segments(load_audio(audio_path), diar, settings, asr)
+    finally:
+        asr.close()
+    merged = merge_segments(raw)
     text = format_transcript(merged)
 
     out_path = settings.transcript_dir / f"{episode_id}.txt"

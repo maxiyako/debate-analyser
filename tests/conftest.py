@@ -58,3 +58,20 @@ def voice_audio() -> np.ndarray:
     audio[6 * SR : 10 * SR] = 0.5
     audio[12 * SR : 16 * SR] = -0.5
     return audio
+
+
+class FakeASR:
+    def __init__(self) -> None:
+        self.lengths: list[int] = []
+
+    def transcribe(self, chunks: list[np.ndarray]) -> list[str]:
+        out = []
+        for chunk in chunks:
+            out.append(f"c{len(self.lengths)}")
+            self.lengths.append(len(chunk))
+        return out
+
+
+@pytest.fixture
+def fake_asr() -> FakeASR:
+    return FakeASR()
