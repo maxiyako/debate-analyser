@@ -394,11 +394,34 @@ class ExtractedClaims(BaseModel):
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
 
+class SubFactStatus(str, Enum):
+    CONFIRMED = "confirmed"  # a cited source states it
+    REFUTED = "refuted"  # a cited source explicitly states the opposite
+    DISTORTED = "distorted"  # literally true, but a cited source shows it misrepresents reality
+    NOT_FOUND = "not_found"  # no source addresses it; never evidence against the speaker
+
+
+class SubFact(BaseModel):
+    text: str = Field(description="One atomic part of the claim, in Slovak.")
+    status: SubFactStatus
+    source: str = Field(
+        default="",
+        description=(
+            "The URL (from this run's tool output) whose content gives this status. "
+            "Required for confirmed/refuted/distorted; empty for not_found."
+        ),
+    )
+
+
 class ClaimCheck(BaseModel):
     claim_id: int = Field(description="Must match ExtractedClaim.id from the extractor.")
     verdict: Verdict
     severity: Severity | None = None
     sources: list[str] = Field(default_factory=list)
+    subfacts: list[SubFact] = Field(
+        default_factory=list,
+        description="Atomic parts of the claim, each with its status and source.",
+    )
     intent_signals: list[str] = Field(default_factory=list)
     rationale: str = ""
 
@@ -426,9 +449,9 @@ class ManagerReview(BaseModel):
         default_factory=list,
         description="First-pass sources dropped during the audit, each with a reason.",
     )
-    subfacts: list[str] = Field(
+    subfacts: list[SubFact] = Field(
         default_factory=list,
-        description="Atomic sub-facts checked, each with its one-line result.",
+        description="Atomic sub-facts checked, each with its status and source.",
     )
     escalate: bool = Field(
         default=False,
@@ -470,6 +493,20 @@ def _resolve_redirect(url: str, timeout: float = 8.0) -> str:
         return resp.url or url
     except Exception:  # noqa: BLE001
         return url
+
+
+def _grounded_prompt(query: str, ref: str) -> str:
+    """Prompt for the grounded-search model, which never sees the claim itself."""
+    return (
+        f"Dátum debaty (referenčné 'teraz'): {ref}. Udalosti a zdroje s dátumom "
+        f"do {ref} ber ako reálne. Udalosť alebo zdroj s dátumom PO {ref} je "
+        "anachronická (vznikla až po debate): neuvádzaj ju ako zistenie.\n\n"
+        "Vráť iba zistené fakty k dotazu nižšie: čo presne uvádzajú zdroje, s "
+        "dátumom udalosti a dátumom zverejnenia. Nehodnoť žiadny výrok, nepíš "
+        "verdikt (pravdivé/nepravdivé/zavádzajúce) a nedomýšľaj, čo mohol "
+        "rečník tvrdiť — výrok nepoznáš. Ak zdroje k niečomu mlčia, napíš to.\n\n"
+        f"{query}"
+    )
 
 
 def _build_grounded_search_tool(
@@ -528,14 +565,8 @@ def _build_grounded_search_tool(
                 from datetime import date as _date
 
                 ref = (debate_date or _date.today()).isoformat()
-                dated_query = (
-                    f"Dátum debaty (referenčné 'teraz'): {ref}. Výroky rečníka "
-                    f"sa vzťahujú k tomuto dátumu. Udalosti a zdroje s dátumom do "
-                    f"{ref} ber ako reálne. Udalosť alebo zdroj s dátumom PO {ref} "
-                    "je anachronická (vznikla až po debate): NEPOUŽÍVAJ ju ako "
-                    "dôkaz a na jej základe netvrď, že výrok je nepravdivý.\n\n"
-                    f"{query}"
-                )
+                dated_query = _grounded_prompt(query, ref)
+
                 def _generate():
                     return client.models.generate_content(
                         model=settings.gemini_model,
@@ -1436,6 +1467,17 @@ _CHECK_RULES = (
     "the claim resembles a known past hoax — recent real events can mirror old "
     "debunked stories, so trust the dated search results over memory. If the "
     "search returned nothing usable, use Unverified, NOT False or Misleading.\n"
+    "- subfacts: split the claim into its atomic parts, each {text, status, "
+    "source}. status is one of: confirmed (a source states it), refuted (a "
+    "source explicitly states the opposite), distorted (literally true, but a "
+    "source shows it misrepresents reality), not_found (no source addresses "
+    "it). source is the URL whose content gives the status; leave it empty for "
+    "not_found. Judge each part against what the speaker actually said in the "
+    "quote, not against a stronger or different version of it. False requires "
+    "at least one refuted part, Misleading at least one refuted or distorted "
+    "part — code discards any accusation without one. A part you could not "
+    "find is not_found, never refuted: 'no record of X was found' does not "
+    "show that X did not happen.\n"
     "- severity: when verdict is False or Misleading, set trivial "
     "(minor rounding/imprecision), material (changes the argument), or "
     "fabrication (no factual basis / publicly debunked). Omit severity for "
@@ -1454,7 +1496,8 @@ _CHECK_RULES = (
 
 _CHECK_EXPECTED_OUTPUT = (
     "ClaimCheckList JSON: one ClaimCheck per claim_id with verdict, severity "
-    "(if False/Misleading), intent_signals, source URLs, and rationale."
+    "(if False/Misleading), subfacts (text, status, source), intent_signals, "
+    "source URLs, and rationale."
 )
 
 
@@ -1717,8 +1760,9 @@ _MANAGER_RULES = (
     "metric, period, territory — see METRIC FIDELITY below). Remove "
     "off-topic sources.\n"
     "2) SUB-FACT DECOMPOSITION — split compound claims into atomic sub-facts "
-    "and list them in `subfacts` with a one-line result each ('confirmed by "
-    "<url>', 'refuted by <url>', 'no evidence found'). For every sub-fact "
+    "and list them in `subfacts`, each {text, status, source} with status "
+    "confirmed / refuted / distorted / not_found and the URL that gives it "
+    "(empty for not_found). For every sub-fact "
     "lacking evidence run targeted searches (susr_data_search for statistics, "
     "sk_source_search / vertex_grounded_search otherwise) with a QUERY BUILT "
     "ONLY from the claim/quote/context — never inject entities from memory.\n"
@@ -1731,7 +1775,10 @@ _MANAGER_RULES = (
     "pass (below). Downgrading to Unverified is always allowed and is the "
     "correct move when the audit destroyed the supporting evidence. A "
     "False/Misleading verdict still REQUIRES at least one surviving source "
-    "that contradicts the claim as a whole.\n"
+    "that contradicts the claim as a whole, recorded as a refuted (or, for "
+    "Misleading, distorted) sub-fact. Failing to find a record, vote, quote or "
+    "figure is not_found — it never turns Unverified into False or "
+    "Misleading.\n"
     "5) ESCALATE — set escalate=true ONLY if the claim ends Unverified or "
     "Contested AND you found a concrete lead (a named dataset, register, or "
     "event) that one more focused round could confirm. Mention the lead in "
@@ -1806,7 +1853,8 @@ def build_manager_crew(
         expected_output=(
             "ManagerReviewList JSON: one ManagerReview per claim_id with final "
             "verdict, severity (if False/Misleading), final sources, "
-            "removed_sources (each with reason), subfacts, escalate, rationale."
+            "removed_sources (each with reason), subfacts (text, status, "
+            "source), escalate, rationale."
         ),
         agent=manager,
         output_pydantic=ManagerReviewList,
@@ -2184,6 +2232,13 @@ def run_analysis(
         risky_words=name_words(_allowed_names(smap, briefing)),
     )
     report.critic_notes = [*report.critic_notes, *accusation_notes]
+    if settings.fidelity_enabled:
+        from src.fidelity import audit_accusations, default_fidelity_llm
+
+        fidelity_notes = audit_accusations(
+            report.facts, working_lines, llm=default_fidelity_llm(settings)
+        )
+        report.critic_notes = [*report.critic_notes, *fidelity_notes]
     report.claim_funnel = build_claim_funnel(
         extracted.claims if extracted else [], kept_claims, report.facts, guest_names
     )

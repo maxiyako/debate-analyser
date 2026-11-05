@@ -12,6 +12,8 @@ from src.agents import (
     ManagerReview,
     ManagerReviewList,
     RemovedSource,
+    SubFact,
+    SubFactStatus,
     Verdict,
     VerifiedFact,
 )
@@ -44,6 +46,9 @@ def test_manager_verdict_with_provenance_source_is_applied() -> None:
                 verdict=Verdict.FALSE,
                 severity="material",
                 sources=[REAL_URL],
+                subfacts=[
+                    SubFact(text="Deficit 6 %", status=SubFactStatus.REFUTED, source=REAL_URL)
+                ],
                 rationale="RRZ data contradict the figure.",
             )
         ]
@@ -51,7 +56,7 @@ def test_manager_verdict_with_provenance_source_is_applied() -> None:
     escalated, notes = apply_manager_reviews([claim], {1: fact}, reviews, {REAL_URL})
     assert fact.verdict == Verdict.FALSE
     assert fact.sources == [REAL_URL]
-    assert fact.rationale == "RRZ data contradict the figure."
+    assert fact.rationale.startswith("RRZ data contradict the figure.")
     assert escalated == []
 
 

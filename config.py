@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Evidence judge: audits cited pages, may downgrade unsupported verdicts.
     judge_enabled: bool = False
     judge_model: str | None = None  # None = same as gemini_model
+    # Fidelity gate: re-reads each False/Misleading against the transcript and
+    # the debate's other verdicts; downgrades verdicts that refute something
+    # the speaker did not say. Uses judge_model.
+    fidelity_enabled: bool = True
     # Fact-check manager (Phase B2): round 1 audits all checked claims;
     # further rounds re-verify only escalated (Unverified/Contested with a
     # concrete lead) claims. 0 disables the manager.

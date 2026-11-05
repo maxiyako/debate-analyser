@@ -63,6 +63,45 @@ def test_rejudge_uses_dates_file_and_payload_and_lists_skipped(tmp_path: Path) -
     assert out["overall"]["mean_quality"] == 95.0  # axes (2,2,2,2,1) -> 95.0
 
 
+def test_fidelity_eval_scores_gate_against_labels(tmp_path: Path) -> None:
+    from src.eval import fidelity_eval
+    from src.fidelity import FidelityOutput, Reading
+
+    reports, transcripts = tmp_path / "r", tmp_path / "t"
+    reports.mkdir()
+    transcripts.mkdir()
+    facts = [
+        {**_fact("False"), "claim": "Bad one", "timestamp": "00:10"},
+        {**_fact("Misleading"), "claim": "Good one", "timestamp": "00:20"},
+        {**_fact("False"), "claim": "Unsure one"},
+        _fact("True"),
+    ]
+    _write_report(reports, "100", facts)
+    (transcripts / "100.corrected.txt").write_text("X [00:10]: q\nX [00:20]: q\n", encoding="utf-8")
+    gold = [
+        {"report": "100", "index": 0, "claim_prefix": "Bad", "label": "downgrade"},
+        {"report": "100", "index": 1, "claim_prefix": "Good", "label": "keep"},
+        {"report": "100", "index": 2, "claim_prefix": "Unsure", "label": "doubtful"},
+        {"report": "100", "index": 3, "claim_prefix": "Moved", "label": "keep"},
+    ]
+    seen: list[str] = []
+
+    def llm(prompt: str) -> FidelityOutput:
+        seen.append(prompt)
+        bad = "CLAIM AS EXTRACTED: Good" not in prompt
+        return FidelityOutput(
+            asserted="a", refuted="b", reading=Reading.DIFFERENT if bad else Reading.SAME
+        )
+
+    out = fidelity_eval(gold, reports, transcripts, llm=llm)
+    assert len(seen) == 3  # True fact is never audited
+    assert out["summary"]["downgrade"] == {"n": 1, "downgraded": 1}
+    assert out["summary"]["keep"] == {"n": 1, "downgraded": 0}
+    assert out["summary"]["doubtful"] == {"n": 1, "downgraded": 1}
+    assert out["stale"] == ["100#3"]
+    assert "X [00:10]: q" in seen[0]
+
+
 def test_rejudge_only_filter(tmp_path: Path) -> None:
     _write_report(tmp_path, "100", [_fact("True")])
     _write_report(tmp_path, "101", [_fact("True")])

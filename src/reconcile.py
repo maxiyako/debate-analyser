@@ -16,10 +16,17 @@ from src.agents import (
     ExtractedClaims,
     ManagerReviewList,
     Severity,
+    SubFact,
+    SubFactStatus,
     Verdict,
     VerifiedFact,
 )
 from src.validation import _normalize_url, is_blocked_source
+
+_BACKING = {
+    Verdict.FALSE: (SubFactStatus.REFUTED,),
+    Verdict.MISLEADING: (SubFactStatus.REFUTED, SubFactStatus.DISTORTED),
+}
 
 
 @dataclass
@@ -41,12 +48,37 @@ def _filter_sources(sources: list[str], seen_urls: set[str]) -> list[str]:
     return kept
 
 
+def accusation_backed(verdict: Verdict, subfacts: list[SubFact], sources: list[str]) -> bool:
+    """True unless an accusation lacks a sub-fact that a surviving source refutes.
+
+    False needs a refuted sub-fact, Misleading a refuted or distorted one, and
+    the sub-fact's URL must be among `sources`. A not_found sub-fact is never
+    evidence against the speaker, however the rationale words it.
+    """
+    wanted = _BACKING.get(verdict)
+    if wanted is None:
+        return True
+    kept = {_normalize_url(u) for u in sources}
+    return any(
+        s.status in wanted and s.source and _normalize_url(s.source) in kept
+        for s in subfacts
+    )
+
+
+def _render_subfacts(subfacts: list[SubFact]) -> str:
+    return " | ".join(
+        f"{s.text}: {s.status.value}" + (f" ({s.source})" if s.source else "")
+        for s in subfacts
+    )
+
+
 def _is_supported(check: ClaimCheck | None, sources: list[str]) -> bool:
     """True if this side's verdict can stand on real evidence.
 
     True with zero sources is allowed (search confirmed but citations missing).
     Unverified is an explicit abstention.
-    False / Misleading without real sources = abstain (prior belief only).
+    False / Misleading without a refuting sub-fact backed by a real source =
+    abstain (prior belief or absence of evidence only).
     """
     if check is None:
         return False
@@ -54,7 +86,7 @@ def _is_supported(check: ClaimCheck | None, sources: list[str]) -> bool:
         return False
     if check.verdict == Verdict.TRUE:
         return True
-    return bool(sources)
+    return bool(sources) and accusation_backed(check.verdict, check.subfacts, sources)
 
 
 def merge_checklists(checklists: list[ClaimCheckList | None]) -> ClaimCheckList | None:
@@ -296,6 +328,13 @@ def apply_manager_reviews(
             )
             verdict = Verdict.UNVERIFIED
             severity = None
+        elif not accusation_backed(verdict, review.subfacts, sources):
+            notes.append(
+                f"Manager {label}: {verdict.value} had no refuted sub-fact backed "
+                "by a surviving source → Unverified"
+            )
+            verdict = Verdict.UNVERIFIED
+            severity = None
         if verdict in (Verdict.TRUE, Verdict.UNVERIFIED, Verdict.CONTESTED):
             severity = None
 
@@ -311,7 +350,7 @@ def apply_manager_reviews(
             rationale += (
                 ("\n" if rationale else "")
                 + "Sub-facts: "
-                + " | ".join(review.subfacts)
+                + _render_subfacts(review.subfacts)
             )
         if rationale:
             fact.rationale = rationale

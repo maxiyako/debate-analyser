@@ -18,6 +18,10 @@ def test_output_limit_raises_cap_and_leaves_thinking_dynamic() -> None:
     assert kw == {"max_tokens": 65536}
 
 
+def test_fidelity_gate_on_by_default() -> None:
+    assert _settings().fidelity_enabled is True
+
+
 def test_vertex_not_ready_without_project_id() -> None:
     assert _settings(gcp_project_id="").vertex_ready() is False
 
