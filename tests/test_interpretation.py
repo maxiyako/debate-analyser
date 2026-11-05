@@ -144,6 +144,18 @@ def test_number_from_nowhere_is_reported() -> None:
     assert unsupported_numbers(r, claim(), "", "", DEBATE) == ["7.4"]
 
 
+def test_digits_of_the_extracted_claim_are_allowed() -> None:
+    c = claim(claim="Rozpočet na rok 2027 zachováva viac ako 60 miliónov eur.")
+    r = reading(interpretation="Rozpočet na rok 2027 zachováva viac ako 60 mil. eur.", not_asserted=[])
+    assert unsupported_numbers(r, c, "", "", DEBATE) == []
+    assert unsupported_numbers(reading(refutation_would_be="rok 2028"), c, "", "", DEBATE) == ["2028"]
+
+
+def test_prompt_forbids_attribution_frames_in_claim_text() -> None:
+    p = build_interpretation_prompt([claim()], {}, [claim()], "", DEBATE)
+    assert "No attribution frame" in p and "belong in\n  interpretation" in p
+
+
 def test_briefing_referent_digits_need_the_briefing() -> None:
     ctx = referent_context(briefing())
     ok = reading(

@@ -196,8 +196,10 @@ selected `ExtractedClaim` list in place:
    selected claim without a reading keeps its legacy fields and gets a note.
 2. **Number guard.** Every digit token (normalized: "30", "2021", "11,5" ->
    "11.5") in `interpretation`, `claim`, `not_asserted` and
-   `refutation_would_be` must occur in the quote, the window, `time_window`,
-   the debate date, or the `resolved` text of a briefing-origin referent. A
+   `refutation_would_be` must occur in the quote, the extracted claim text
+   (replay of 33 keep cases: without this, 98 readings were rejected for
+   years such as 2027 that the extractor took from context), the window,
+   `time_window`, the debate date, or the `resolved` text of a briefing-origin referent. A
    briefing-origin referent's `resolved` text is itself accepted only if each
    of its digit tokens occurs in the referent context the pass received
    (participants, `entity_index`, glossary terms and definitions). Glossary

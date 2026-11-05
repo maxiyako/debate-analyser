@@ -128,9 +128,10 @@ def unsupported_numbers(
     ref_context: str,
     debate_date: date | None,
 ) -> list[str]:
-    """Digit tokens in the reading that neither the transcript nor a briefing referent backs."""
+    """Digit tokens in the reading that neither the transcript, the extracted claim nor a briefing referent backs."""
     allowed = (
         digit_tokens(claim.quote)
+        | digit_tokens(claim.claim)
         | digit_tokens(window)
         | digit_tokens(claim.time_window)
         | digit_tokens(debate_date.isoformat() if debate_date else "")
@@ -240,7 +241,11 @@ said in the other listed claims. Return one reading per claim:
   every added qualifier, dropped qualifier, wrong referent, changed metric
   (e.g. production start instead of allocation, ministry instead of
   government) and changed period. Empty when the claim is faithful.
-- claim: when drift is not empty, a faithful one-sentence Slovak claim text.
+- claim: when drift is not empty, a faithful one-sentence Slovak claim text,
+  the proposition in the speaker's own voice. No attribution frame ("Podľa
+  vyjadrenia ...", "X tvrdí, že ...") and no quotation marks; the speaker's
+  hedges and uncertainty ("myslím", "pokiaľ si pamätám") belong in
+  interpretation, not in claim.
 - referents: each resolution as {text, resolved, origin}. origin is
   "transcript" when the transcript settles it, "briefing" when only the
   PARTICIPANTS AND OFFICES list does. Use that list for nothing else.
@@ -253,8 +258,9 @@ said in the other listed claims. Return one reading per claim:
 - related_claim_ids: ids of other listed claims about the same fact, vote,
   figure or dispute.
 
-Write no number, date or figure that is not in the quote, the transcript
-around it, the claim's time window, or the PARTICIPANTS AND OFFICES list.
+Write no number, date or figure that is not in the quote, the extracted
+claim, the transcript around it, the claim's time window, or the
+PARTICIPANTS AND OFFICES list.
 """
 
 
