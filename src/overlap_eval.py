@@ -5,12 +5,16 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from src.overlap import SR, Region, Turn, lead_speaker
+from src.overlap import SR, OverlapTools, Region, Turn, lead_speaker
 from src.transcript_lines import Line, parse_lines, strip_markers
-from src.transcription import Diarization, Segment
+from src.transcription import ASR, Diarization, Segment, build_segments
+
+if TYPE_CHECKING:
+    from config import Settings
 
 CONTEXT_SECONDS = 2.0
 LINE_TOLERANCE = 1.0
@@ -153,3 +157,41 @@ def build_candidates(
 def merge_gold(existing: list[dict], new: list[dict]) -> list[dict]:
     seen = {(e["episode"], e["start"]) for e in existing}
     return existing + [n for n in new if (n["episode"], n["start"]) not in seen]
+
+
+def run_overlap_eval(
+    gold: list[dict],
+    *,
+    transcripts: dict[str, str],
+    audio: dict[str, np.ndarray],
+    diar: dict[str, Diarization],
+    settings: Settings,
+    asr: ASR,
+    tools: OverlapTools,
+) -> dict:
+    filled = [g for g in gold if g["gold"] and all(t.strip() for t in g["gold"].values())]
+    rows: dict[str, list[dict]] = {"existing": [], "exclusive": [], "separated": []}
+    regions: list[dict] = []
+    spans_by_ep = {ep: line_spans(parse_lines(text)) for ep, text in transcripts.items()}
+    maps = {ep: map_labels(spans_by_ep[ep], diar[ep].exclusive_turns) for ep in transcripts}
+
+    for g in filled:
+        ep, start, end = g["episode"], g["start"], g["end"]
+        window = (start - CONTEXT_SECONDS, end + CONTEXT_SECONDS)
+        exclusive = build_segments(audio[ep], diar[ep], settings, asr, window=window)
+        separated = build_segments(audio[ep], diar[ep], settings, asr, tools=tools, window=window)
+        scores = {
+            "existing": score_region(g["gold"], g["dominant"], hyp_from_lines(spans_by_ep[ep], maps[ep], start, end)),
+            "exclusive": score_region(g["gold"], g["dominant"], hyp_from_segments(exclusive, start, end)),
+            "separated": score_region(g["gold"], g["dominant"], hyp_from_segments(separated, start, end)),
+        }
+        for name, score in scores.items():
+            rows[name].append(score)
+        regions.append({"episode": ep, "start": start, "end": end, **scores})
+
+    summaries = {name: summarize(scores) for name, scores in rows.items()}
+    return {
+        "rows": summaries,
+        "gate": gate(summaries["exclusive"], summaries["separated"]),
+        "regions": regions,
+    }

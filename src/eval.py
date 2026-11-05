@@ -466,5 +466,77 @@ def interpret_replay_cmd(
     click.echo(f"Written: {out_path}")
 
 
+@cli.command("overlap-candidates")
+@click.argument("episode")
+@click.option("--top", default=10, type=int, help="Longest two-speaker regions to export.")
+@click.option("--gold", "gold_path", type=click.Path(path_type=Path), default=Path("data/eval/overlap_gold.json"))
+@click.option("--clips", "clips_dir", type=click.Path(path_type=Path), default=Path("data/eval/overlap_clips"))
+def overlap_candidates(episode: str, top: int, gold_path: Path, clips_dir: Path) -> None:
+    """Export overlap regions of an episode as clips plus gold entries to fill in."""
+    from config import get_settings
+    from src.overlap import find_overlap_regions
+    from src.overlap_eval import build_candidates, merge_gold
+    from src.transcription import load_audio, load_or_diarize
+
+    settings = get_settings()
+    audio_path = settings.audio_dir / f"{episode}.wav"
+    diar = load_or_diarize(audio_path, episode, settings)
+    regions = find_overlap_regions(diar.turns, min_seconds=settings.overlap_min_seconds)
+    transcript = (settings.transcript_dir / f"{episode}.txt").read_text(encoding="utf-8")
+    new = build_candidates(episode, diar, load_audio(audio_path), transcript, regions, clips_dir / episode, top)
+
+    existing = json.loads(gold_path.read_text(encoding="utf-8")) if gold_path.exists() else []
+    merged = merge_gold(existing, new)
+    gold_path.parent.mkdir(parents=True, exist_ok=True)
+    gold_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    click.echo(f"{len(regions)} overlap regions, exported {len(new)}; gold now has {len(merged)} entries")
+    click.echo(f"Fill in 'gold' per speaker in {gold_path}, listening to each 'clip'.")
+
+
+@cli.command()
+@click.option("--gold", "gold_path", type=click.Path(path_type=Path, exists=True), default=Path("data/eval/overlap_gold.json"))
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=Path("data/eval/overlap_result.json"))
+def overlap(gold_path: Path, out_path: Path) -> None:
+    """Score existing, exclusive and separated transcripts on the overlap gold set."""
+    from config import get_settings
+    from src.overlap import load_overlap_tools
+    from src.overlap_eval import run_overlap_eval
+    from src.transcription import WhisperASR, load_audio, load_or_diarize
+
+    settings = get_settings()
+    gold = json.loads(gold_path.read_text(encoding="utf-8"))
+    episodes = sorted({g["episode"] for g in gold})
+    audio, diar, transcripts = {}, {}, {}
+    for ep in episodes:
+        audio_path = settings.audio_dir / f"{ep}.wav"
+        audio[ep] = load_audio(audio_path)
+        diar[ep] = load_or_diarize(audio_path, ep, settings)
+        transcripts[ep] = (settings.transcript_dir / f"{ep}.txt").read_text(encoding="utf-8")
+
+    tools = load_overlap_tools(settings)
+    asr = WhisperASR(settings)
+    try:
+        result = run_overlap_eval(
+            gold, transcripts=transcripts, audio=audio, diar=diar, settings=settings, asr=asr, tools=tools
+        )
+    finally:
+        asr.close()
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    click.echo(f"{'row':<11}{'regions':>8}{'dominant':>10}{'interrupter':>13}{'misattr':>9}")
+    for name, row in result["rows"].items():
+        click.echo(
+            f"{name:<11}{row['regions']:>8}{row['dominant_recall']:>10.2f}"
+            f"{row['interrupter_recall']:>13.2f}{row['misattributed']:>9}"
+        )
+    g = result["gate"]
+    verdict = "PASS" if g["passed"] else "FAIL"
+    click.echo(
+        f"GATE {verdict}: interrupter +{g['interrupter_gain']:.2f} (need >= 0.25), "
+        f"dominant -{g['dominant_drop']:.2f} (max 0.05), misattributed {g['misattributed_delta']:+d} (max 0)"
+    )
+    click.echo(f"Written: {out_path}")
+
+
 if __name__ == "__main__":
     cli()

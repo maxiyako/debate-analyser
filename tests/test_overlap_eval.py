@@ -127,3 +127,48 @@ def test_merge_gold_skips_duplicates_and_keeps_filled_text() -> None:
     merged = merge_gold(old, new)
     assert [m["start"] for m in merged] == [4.0, 9.0]
     assert merged[0]["gold"] == {"S0": "vyplnené"}
+
+
+from click.testing import CliRunner
+
+from config import Settings
+from src.overlap import OverlapTools
+from src.overlap_eval import run_overlap_eval
+
+
+def test_run_overlap_eval_scores_three_rows(voice_audio, fake_separator, fake_embedder, fake_asr) -> None:
+    diar = Diarization(
+        "m",
+        [(0.0, 10.0, "A"), (4.0, 6.0, "B"), (12.0, 16.0, "B")],
+        [(0.0, 10.0, "A"), (12.0, 16.0, "B")],
+    )
+    gold = [
+        {"episode": "ep", "start": 4.0, "end": 6.0, "speakers": ["A", "B"], "dominant": "A",
+         "gold": {"A": "c0 c1", "B": "c2"}},
+        {"episode": "ep", "start": 9.0, "end": 9.5, "speakers": ["A", "B"], "dominant": "A",
+         "gold": {"A": "", "B": ""}},
+    ]
+    settings = Settings(_env_file=None, enroll_min_seconds=1.0)
+    result = run_overlap_eval(
+        gold,
+        transcripts={"ep": "Speaker A [00:00]: c0 c1 c2\nSpeaker B [00:12]: nič\n"},
+        audio={"ep": voice_audio},
+        diar={"ep": diar},
+        settings=settings,
+        asr=fake_asr,
+        tools=OverlapTools(separator=fake_separator, embedder=fake_embedder),
+    )
+    assert set(result["rows"]) == {"existing", "exclusive", "separated"}
+    assert all(row["regions"] == 1 for row in result["rows"].values())
+    assert result["rows"]["existing"]["interrupter_recall"] == 0.0
+    assert result["rows"]["existing"]["misattributed"] == 0
+    assert set(result["gate"]) == {"interrupter_gain", "dominant_drop", "misattributed_delta", "passed"}
+    assert [r["start"] for r in result["regions"]] == [4.0]
+
+
+def test_cli_commands_registered() -> None:
+    from src.eval import cli
+
+    runner = CliRunner()
+    assert runner.invoke(cli, ["overlap-candidates", "--help"]).exit_code == 0
+    assert runner.invoke(cli, ["overlap", "--help"]).exit_code == 0
