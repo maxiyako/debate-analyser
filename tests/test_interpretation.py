@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from config import Settings
 from src.agents import ExtractedClaim, Referent, ReferentOrigin
 from src.briefing import (
     DebateBriefing,
@@ -21,13 +22,17 @@ from src.briefing import (
 )
 from src.interpretation import (
     ClaimReading,
+    ClaimReadings,
     Drift,
     DriftKind,
     apply_readings,
+    build_interpretation_prompt,
     clear_interpretation,
     digit_tokens,
+    interpret_claims,
     locate_window,
     referent_context,
+    run_interpretation,
     unsupported_numbers,
 )
 from src.transcript_lines import parse_lines
@@ -227,3 +232,88 @@ def test_clear_interpretation_blanks_and_optionally_restores() -> None:
     d = claim(claim_extracted="extractor filled this", interpretation="x")
     clear_interpretation([d])
     assert d.claim.startswith("Zrušenie") and d.claim_extracted == "" and d.interpretation == ""
+
+
+# --- prompt and batched pass --------------------------------------------------------
+
+
+def test_prompt_carries_claim_quote_window_siblings_and_referents_only() -> None:
+    c = claim(time_reference="v septembri", time_window="2025-09")
+    sib = claim(id=2, speaker="Tomáš Taraba", claim="Opozícia nič nepresadila.", quote="Opozícia nič nepresadila.")
+    ctx = referent_context(briefing())
+    p = build_interpretation_prompt([c], {1: locate_window(LINES, c, 1)}, [c, sib], ctx, DEBATE)
+    assert "CLAIM 1" in p and c.claim in p and c.quote in p
+    assert "Michal Šimečka [09:04]" in p
+    assert "v septembri" in p and "2025-09" in p
+    assert "#2 Tomáš Taraba: Opozícia nič nepresadila." in p
+    assert "2026-09-27" in p
+    assert '"vláda" = vláda Roberta Fica' in p
+    assert "NR SR schválila výnimku" not in p and "Kto zrušil daň?" not in p
+    assert "not_asserted" in p and "refutation_would_be" in p
+
+
+def test_claims_are_sent_in_chunks_with_full_sibling_list() -> None:
+    claims = [claim(id=i, claim=f"Tvrdenie {i}.") for i in range(1, 46)]
+    prompts: list[str] = []
+
+    def llm(prompt: str) -> ClaimReadings:
+        prompts.append(prompt)
+        return ClaimReadings()
+
+    interpret_claims(claims, LINES, llm=llm, debate_date=DEBATE, window=1, chunk=20)
+    assert len(prompts) == 3
+    assert all("#45 Michal Šimečka: Tvrdenie 45." in p for p in prompts)
+    assert "CLAIM 21" in prompts[1] and "CLAIM 20" not in prompts[1]
+
+
+def test_failed_chunk_is_noted_and_others_still_apply() -> None:
+    claims = [claim(id=1), claim(id=2)]
+    calls = iter([RuntimeError("quota"), ClaimReadings(readings=[reading(claim_id=2)])])
+
+    def llm(_prompt: str) -> ClaimReadings:
+        out = next(calls)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    notes = interpret_claims(claims, LINES, llm=llm, debate_date=DEBATE, window=1, chunk=1)
+    assert claims[0].interpretation == "" and claims[1].interpretation
+    assert any("quota" in n for n in notes)
+
+
+def _on(**kw) -> Settings:
+    return Settings(_env_file=None, interpretation_enabled=True, **kw)
+
+
+def test_run_interpretation_is_a_no_op_when_disabled() -> None:
+    def boom(_prompt: str) -> ClaimReadings:
+        raise AssertionError("must not be called")
+
+    c = claim()
+    assert run_interpretation([c], LINES, Settings(_env_file=None), llm=boom) == []
+    assert c.interpretation == ""
+
+
+def test_run_interpretation_applies_readings_when_enabled() -> None:
+    c = claim()
+    notes = run_interpretation(
+        [c], LINES, _on(), debate_date=DEBATE, llm=lambda _p: ClaimReadings(readings=[reading()])
+    )
+    assert c.claim_extracted and c.interpretation
+    assert any("rewrote claim 1" in n for n in notes)
+
+
+def test_run_interpretation_failure_restores_claims(monkeypatch) -> None:
+    import src.interpretation as mod
+
+    def half_done(claims, *_a, **_kw):
+        claims[0].claim_extracted = claims[0].claim
+        claims[0].claim = "prepísané"
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "interpret_claims", half_done)
+    c = claim()
+    notes = run_interpretation([c], LINES, _on(), llm=lambda _p: ClaimReadings())
+    assert c.claim.startswith("Zrušenie transakčnej dane prešlo v")
+    assert c.claim_extracted == ""
+    assert any("Interpretation failed" in n and "boom" in n for n in notes)
