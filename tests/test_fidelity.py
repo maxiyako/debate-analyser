@@ -115,3 +115,27 @@ def test_llm_failure_keeps_the_verdict_and_notes_it() -> None:
     notes = audit_accusations([f], LINES, llm=boom)
     assert f.verdict == Verdict.FALSE
     assert any("quota" in n for n in notes)
+
+
+def test_prompt_carries_recorded_reading_when_present() -> None:
+    f = fact()
+    f.interpretation = "Návrh prešiel prvým čítaním a KDH zaň hlasovalo."
+    f.not_asserted = ["návrh bol definitívne schválený"]
+    p = build_fidelity_prompt(f, "", [f])
+    assert "READING RECORDED BEFORE CHECKING (may be wrong)" in p
+    assert f.interpretation in p and "návrh bol definitívne schválený" in p
+    # The instructions mention the reading; only the block carries this header.
+    assert "READING RECORDED BEFORE CHECKING (may be wrong)" not in build_fidelity_prompt(fact(), "", [])
+
+
+def test_siblings_can_differ_from_audited_facts() -> None:
+    target = fact()
+    other = fact(Verdict.TRUE, ts="11:59", claim="Iné tvrdenie o daniach.")
+    prompts: list[str] = []
+
+    def llm(prompt: str) -> FidelityOutput:
+        prompts.append(prompt)
+        return out(Reading.SAME)
+
+    audit_accusations([target], LINES, llm=llm, siblings=[target, other])
+    assert len(prompts) == 1 and "Iné tvrdenie o daniach." in prompts[0]

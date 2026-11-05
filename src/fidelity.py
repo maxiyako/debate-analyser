@@ -72,6 +72,11 @@ shows to be false. Then pick `reading`:
 - contradicted_by_context: the transcript or another verdict of this debate
   shows the asserted part did happen or is true.
 
+A READING RECORDED BEFORE CHECKING, when given, was written from the
+transcript before any search and may be wrong: still write your own
+`asserted`. When what the evidence refutes matches one of its "not
+asserted" items, the reading is stronger_reading or different_referent.
+
 Pick same whenever the evidence does hit the asserted proposition, even if the
 speaker's wording is loose. A rounding or a slightly wrong figure the
 rationale documents is same, not stronger_reading.
@@ -99,12 +104,20 @@ def build_fidelity_prompt(
         for f in facts
         if f is not fact
     )
+    recorded = ""
+    if fact.interpretation:
+        recorded = (
+            "READING RECORDED BEFORE CHECKING (may be wrong):\n"
+            f"  interpretation: {fact.interpretation}\n"
+            f"  not asserted: {'; '.join(fact.not_asserted) or '(none)'}\n"
+        )
     return (
         f"{_INSTRUCTIONS}\n"
         f"TRANSCRIPT AROUND THE QUOTE:\n{window or '(unavailable)'}\n\n"
         f"SPEAKER: {fact.speaker}\n"
         f"QUOTE: {fact.quote}\n"
         f"CLAIM AS EXTRACTED: {fact.claim}\n"
+        f"{recorded}"
         f"VERDICT: {fact.verdict.value}"
         f"{' / ' + fact.severity.value if fact.severity else ''}\n"
         f"RATIONALE: {fact.rationale[:1500]}\n\n"
@@ -117,13 +130,15 @@ def audit_accusations(
     lines: list[Line],
     *,
     llm: Callable[[str], FidelityOutput],
+    siblings: list[VerifiedFact] | None = None,
 ) -> list[str]:
     """Downgrade, in place, every accusation whose rationale misses the assertion."""
     notes: list[str] = []
+    context = facts if siblings is None else siblings
     for fact in facts:
         if fact.verdict not in _ACCUSATIONS:
             continue
-        prompt = build_fidelity_prompt(fact, transcript_window(lines, fact), facts)
+        prompt = build_fidelity_prompt(fact, transcript_window(lines, fact), context)
         try:
             result = llm(prompt)
         except Exception as exc:  # noqa: BLE001 - one failed audit must not sink the report
