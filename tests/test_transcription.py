@@ -68,3 +68,50 @@ def test_format_transcript_marks_crosstalk() -> None:
     turns = [(0.0, 10.0, "S0"), (3.0, 6.0, "S1")]
     text = format_transcript(merge_diarization_and_asr(asr, turns, crosstalk_min=0.3))
     assert text.startswith("Speaker A [00:03]: (cez seba) prekrikujeme sa")
+
+
+from types import SimpleNamespace
+
+from src.transcription import (
+    Diarization,
+    diarization_cache_path,
+    diarization_from_output,
+    load_diarization,
+    save_diarization,
+)
+
+
+class FakeAnnotation:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def itertracks(self, yield_label=False):
+        for start, end, speaker in self.rows:
+            yield SimpleNamespace(start=start, end=end), None, speaker
+
+
+def test_diarization_from_output_keeps_both_views() -> None:
+    output = SimpleNamespace(
+        speaker_diarization=FakeAnnotation([(0.0, 10.0, "S0"), (4.0, 6.0, "S1")]),
+        exclusive_speaker_diarization=FakeAnnotation([(0.0, 10.0, "S0")]),
+    )
+    diar = diarization_from_output(output, "m")
+    assert diar == Diarization("m", [(0.0, 10.0, "S0"), (4.0, 6.0, "S1")], [(0.0, 10.0, "S0")])
+
+
+def test_diarization_from_legacy_annotation() -> None:
+    diar = diarization_from_output(FakeAnnotation([(0.0, 5.0, "S0")]), "m")
+    assert diar.turns == diar.exclusive_turns == [(0.0, 5.0, "S0")]
+
+
+def test_diarization_cache_round_trip(tmp_path) -> None:
+    path = diarization_cache_path(tmp_path, "ep1")
+    assert path.name == "ep1.diarization.v2.json"
+    diar = Diarization("m", [(0.0, 1.5, "S0")], [(0.0, 1.5, "S0")])
+    save_diarization(path, diar)
+    assert load_diarization(path) == diar
+
+
+def test_old_cache_is_never_read(tmp_path) -> None:
+    (tmp_path / "ep1.diarization.json").write_text("[[0.0, 1.0, \"S0\"]]", encoding="utf-8")
+    assert load_diarization(diarization_cache_path(tmp_path, "ep1")) is None

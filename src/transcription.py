@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from config import Settings, get_settings
 from src.gcs import upload_file
+from src.overlap import Turn
 
 logger = logging.getLogger(__name__)
 
@@ -36,53 +38,81 @@ def _speaker_label(raw: str, mapping: dict[str, str]) -> str:
     return mapping[raw]
 
 
-def diarize(audio_path: Path, settings: Settings) -> list[tuple[float, float, str]]:
-    """Return list of (start, end, speaker_id) from Pyannote."""
+@dataclass
+class Diarization:
+    model: str
+    turns: list[Turn]
+    exclusive_turns: list[Turn]
+
+
+def _annotation_turns(annotation) -> list[Turn]:
+    return [
+        (float(turn.start), float(turn.end), str(speaker))
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
+
+
+def diarization_from_output(output, model: str) -> Diarization:
+    regular = getattr(output, "speaker_diarization", None)
+    if regular is None:
+        turns = _annotation_turns(output)
+        return Diarization(model, turns, list(turns))
+    exclusive = getattr(output, "exclusive_speaker_diarization", None) or regular
+    return Diarization(model, _annotation_turns(regular), _annotation_turns(exclusive))
+
+
+def diarize(audio_path: Path, settings: Settings) -> Diarization:
+    """Overlap-aware and exclusive speaker turns from pyannote."""
+    model_id = settings.diarization_model_id
     if not settings.huggingface_token:
         msg = (
             "HUGGINGFACE_TOKEN missing — diarization cannot run, so the whole "
             "transcript would collapse to a single speaker. Accept terms at "
-            "https://huggingface.co/pyannote/speaker-diarization-3.1 and set the token."
+            f"https://huggingface.co/{model_id} and set the token."
         )
         if settings.require_diarization:
             raise RuntimeError(msg)
         logger.warning("%s Falling back to a single speaker (Speaker A).", msg)
-        return []
+        return Diarization(model_id, [], [])
 
     from pyannote.audio import Pipeline
 
-    logger.info("Loading diarization model %s", settings.diarization_model_id)
+    logger.info("Loading diarization model %s", model_id)
     try:
-        pipeline = Pipeline.from_pretrained(
-            settings.diarization_model_id,
-            token=settings.huggingface_token,
-        )
+        pipeline = Pipeline.from_pretrained(model_id, token=settings.huggingface_token)
     except TypeError:
-        pipeline = Pipeline.from_pretrained(
-            settings.diarization_model_id,
-            use_auth_token=settings.huggingface_token,
-        )
+        pipeline = Pipeline.from_pretrained(model_id, use_auth_token=settings.huggingface_token)
 
     import torch
 
-    device = _resolve_device(settings)
-    pipeline.to(torch.device(device))
+    pipeline.to(torch.device(_resolve_device(settings)))
 
     logger.info("Running diarization on %s", audio_path)
-    output = pipeline(str(audio_path))
-
-    # pyannote.audio >= 4 returns DiarizeOutput; older versions return Annotation.
-    annotation = getattr(output, "exclusive_speaker_diarization", None) or getattr(
-        output, "speaker_diarization", None
+    diar = diarization_from_output(pipeline(str(audio_path)), model_id)
+    logger.info(
+        "Found %d speaker turns (%d exclusive)", len(diar.turns), len(diar.exclusive_turns)
     )
-    if annotation is None:
-        annotation = output  # Annotation (legacy)
+    return diar
 
-    turns: list[tuple[float, float, str]] = []
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        turns.append((float(turn.start), float(turn.end), str(speaker)))
-    logger.info("Found %d speaker turns", len(turns))
-    return turns
+
+def diarization_cache_path(transcript_dir: Path, episode_id: str) -> Path:
+    return transcript_dir / f"{episode_id}.diarization.v2.json"
+
+
+def save_diarization(path: Path, diar: Diarization) -> None:
+    payload = {"model": diar.model, "turns": diar.turns, "exclusive_turns": diar.exclusive_turns}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def load_diarization(path: Path) -> Diarization | None:
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    def turns(key: str) -> list[Turn]:
+        return [(float(a), float(b), str(s)) for a, b, s in raw[key]]
+
+    return Diarization(raw["model"], turns("turns"), turns("exclusive_turns"))
 
 
 def _resolve_device(settings: Settings) -> str:
@@ -303,8 +333,6 @@ def format_transcript(segments: list[Segment]) -> str:
 
 def run_transcription(audio_path: Path, episode_id: str, settings: Settings | None = None) -> Path:
     """Diarize + ASR + merge; write transcript file and return its path."""
-    import json
-
     settings = settings or get_settings()
     settings.ensure_dirs()
 
@@ -314,7 +342,7 @@ def run_transcription(audio_path: Path, episode_id: str, settings: Settings | No
         diar_turns = [(float(a), float(b), str(s)) for a, b, s in raw]
         logger.info("Loaded cached diarization (%d turns) from %s", len(diar_turns), diar_cache)
     else:
-        diar_turns = diarize(audio_path, settings)
+        diar_turns = diarize(audio_path, settings).exclusive_turns
         diar_cache.write_text(json.dumps(diar_turns), encoding="utf-8")
         logger.info("Cached diarization -> %s", diar_cache)
 
