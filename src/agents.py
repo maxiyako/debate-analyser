@@ -2040,6 +2040,95 @@ def build_critic_crew(
     return crew
 
 
+def check_claims(
+    claims: list[ExtractedClaim],
+    settings: Settings,
+    debate_date: "date | None" = None,
+    *,
+    pool: list[ExtractedClaim] | None = None,
+    pool_facts: "dict[int, VerifiedFact] | None" = None,
+) -> tuple[list[VerifiedFact], set[str], list[str]]:
+    """Phase B + B2: grounded checker and specialists, reconcile, manager rounds.
+
+    `pool` holds every claim that related_claim_ids may point to (default:
+    `claims`); `pool_facts` holds verdicts for pool claims not checked here.
+    Returns one fact per claim in claim order, the provenance URLs, and notes.
+    """
+    from src.reconcile import (
+        apply_manager_reviews,
+        merge_checklists,
+        parse_task_output,
+        prelim_facts_json,
+        reconcile_checks,
+    )
+
+    seen_urls: set[str] = set()
+    if not claims:
+        return [], seen_urls, []
+    pool = pool or claims
+
+    b_result, b_tasks = kickoff_with_retry(
+        lambda: build_check_crew(claims, settings, seen_urls, debate_date=debate_date, pool=pool),
+        "check",
+    )
+    TRACKER.add_crew("analysis_check", b_result)
+    grounded = parse_task_output(b_tasks["grounded"], ClaimCheckList)
+    specialist_checks = merge_checklists(
+        [parse_task_output(t, ClaimCheckList) for t in b_tasks["specialists"]]
+    )
+    facts, notes = reconcile_checks(
+        ExtractedClaims(claims=claims), grounded, specialist_checks, seen_urls
+    )
+    logger.info(
+        "Reconciled %d facts from extract=%d grounded=%d specialists=%d (seen_urls=%d)",
+        len(facts),
+        len(claims),
+        len(grounded.checks) if grounded else 0,
+        len(specialist_checks.checks) if specialist_checks else 0,
+        len(seen_urls),
+    )
+
+    # Phase B2: cyclic fact-check manager — audits first-pass sources
+    # (existence, date, relevance), hunts missing sub-facts, and re-verifies
+    # weakly supported verdicts. Escalated claims get another focused round.
+    if facts and settings.factcheck_manager_rounds > 0:
+        # reconcile_checks emits one fact per claim, in claim order.
+        facts_by_id = {c.id: f for c, f in zip(claims, facts)}
+        claim_by_id = {c.id: c for c in claims}
+        review_ids = [c.id for c in claims]
+        for round_no in range(1, settings.factcheck_manager_rounds + 1):
+            round_claims = [claim_by_id[i] for i in review_ids]
+            related = _related_block(round_claims, pool, {**(pool_facts or {}), **facts_by_id})
+            m_result, m_task = kickoff_with_retry(
+                lambda: build_manager_crew(
+                    round_claims,
+                    prelim_facts_json(round_claims, facts_by_id),
+                    settings,
+                    seen_urls,
+                    debate_date=debate_date,
+                    round_no=round_no,
+                    related=related,
+                ),
+                f"manager r{round_no}",
+            )
+            TRACKER.add_crew(f"analysis_manager_r{round_no}", m_result)
+            reviews = parse_task_output(m_task, ManagerReviewList)
+            escalated, m_notes = apply_manager_reviews(
+                round_claims, facts_by_id, reviews, seen_urls
+            )
+            notes.extend(f"[round {round_no}] {n}" for n in m_notes)
+            logger.info(
+                "Manager round %d: reviewed %d claims, escalated %d",
+                round_no,
+                len(round_claims),
+                len(escalated),
+            )
+            review_ids = escalated
+            if not review_ids:
+                break
+    return facts, seen_urls, notes
+
+
 def run_analysis(
     transcript: str,
     settings: Settings | None = None,
@@ -2050,7 +2139,7 @@ def run_analysis(
     """Map speakers, correct the transcript by audited edits, then analyze.
 
     Phases: 0) briefing -> speaker map -> edit-based correction -> A) behavioral/
-    moderator/extraction + question audit -> selection -> B) grounded checker +
+    moderator/extraction + question audit -> selection -> A2) interpretation -> B) grounded checker +
     specialists -> B2) manager -> C) critic -> deterministic reconcile, validation,
     accusation guard, claim funnel. Returns (report, corrected).
     """
@@ -2059,7 +2148,8 @@ def run_analysis(
         raise RuntimeError("GCP_PROJECT_ID is not configured")
 
     from src.correction import correct_transcript_edits, default_correction_llm
-    from src.reconcile import merge_checklists, parse_task_output, reconcile_checks
+    from src.interpretation import clear_interpretation, run_interpretation
+    from src.reconcile import parse_task_output
     from src.speakers import CLIP_NAME, apply_speaker_map, default_speaker_llm, map_speakers
     from src.transcript_lines import parse_lines
 
@@ -2148,6 +2238,9 @@ def run_analysis(
         lambda: _extract_standalone(working, settings, debate_date, briefing_text),
     )
     pipeline_notes.extend(retry_notes)
+    if extracted:
+        # The extractor sees these fields in its schema; only code may fill them.
+        clear_interpretation(extracted.claims)
     behavioral_raw = getattr(a_tasks["behavioral"].output, "raw", "") or ""
     moderator_raw = getattr(a_tasks["moderator"].output, "raw", "") or ""
     from src.schema_repair import (
@@ -2192,22 +2285,15 @@ def run_analysis(
     else:
         pipeline_notes.append("Extraction produced no claims; facts will be empty.")
 
-    # Phase B: grounded checker (all claims) + per-category specialists.
-    seen_urls: set[str] = set()
-    grounded = None
-    specialist_checks = None
-    if kept_claims:
-        b_result, b_tasks = kickoff_with_retry(
-            lambda: build_check_crew(
-                kept_claims, settings, seen_urls, debate_date=debate_date
-            ),
-            "check",
+    # Phase A2: record what each selected claim asserts before any search.
+    pipeline_notes.extend(
+        run_interpretation(
+            kept_claims, working_lines, settings, briefing=briefing, debate_date=debate_date
         )
-        TRACKER.add_crew("analysis_check", b_result)
-        grounded = parse_task_output(b_tasks["grounded"], ClaimCheckList)
-        specialist_checks = merge_checklists(
-            [parse_task_output(t, ClaimCheckList) for t in b_tasks["specialists"]]
-        )
+    )
+
+    # Phase B + B2: grounded checker, specialists, reconcile, manager rounds.
+    facts, seen_urls, check_notes = check_claims(kept_claims, settings, debate_date)
 
     # Phase C: critic review of behavioral/moderator sections.
     c_result, _ = kickoff_with_retry(
@@ -2237,51 +2323,6 @@ def run_analysis(
     if repair_notes:
         report.critic_notes = [*report.critic_notes, *repair_notes]
 
-    kept_extracted = ExtractedClaims(claims=kept_claims)
-    facts, reconcile_notes = reconcile_checks(
-        kept_extracted, grounded, specialist_checks, seen_urls
-    )
-
-    # Phase B2: cyclic fact-check manager — audits first-pass sources
-    # (existence, date, relevance), hunts missing sub-facts, and re-verifies
-    # weakly supported verdicts. Escalated claims get another focused round.
-    manager_notes: list[str] = []
-    if facts and settings.factcheck_manager_rounds > 0:
-        from src.reconcile import apply_manager_reviews, prelim_facts_json
-
-        # reconcile_checks emits one fact per claim, in claim order.
-        facts_by_id = {c.id: f for c, f in zip(kept_claims, facts)}
-        claim_by_id = {c.id: c for c in kept_claims}
-        review_ids = [c.id for c in kept_claims]
-        for round_no in range(1, settings.factcheck_manager_rounds + 1):
-            round_claims = [claim_by_id[i] for i in review_ids]
-            m_result, m_task = kickoff_with_retry(
-                lambda: build_manager_crew(
-                    round_claims,
-                    prelim_facts_json(round_claims, facts_by_id),
-                    settings,
-                    seen_urls,
-                    debate_date=debate_date,
-                    round_no=round_no,
-                ),
-                f"manager r{round_no}",
-            )
-            TRACKER.add_crew(f"analysis_manager_r{round_no}", m_result)
-            reviews = parse_task_output(m_task, ManagerReviewList)
-            escalated, m_notes = apply_manager_reviews(
-                round_claims, facts_by_id, reviews, seen_urls
-            )
-            manager_notes.extend(f"[round {round_no}] {n}" for n in m_notes)
-            logger.info(
-                "Manager round %d: reviewed %d claims, escalated %d",
-                round_no,
-                len(round_claims),
-                len(escalated),
-            )
-            review_ids = escalated
-            if not review_ids:
-                break
-
     # Code-owned report sections: the LLM sees these fields in the output
     # schema, so they are always overwritten here, even when empty.
     report.facts = facts
@@ -2300,17 +2341,9 @@ def run_analysis(
             [q for q in question_audit if q.addressee == s.speaker]
         )
 
-    notes = [*pipeline_notes, *reconcile_notes, *manager_notes]
+    notes = [*pipeline_notes, *check_notes]
     if notes:
         report.critic_notes = [*report.critic_notes, *notes]
-    logger.info(
-        "Reconciled %d facts from extract=%s grounded=%s specialists=%s (seen_urls=%d)",
-        len(facts),
-        len(kept_claims),
-        len(grounded.checks) if grounded else 0,
-        len(specialist_checks.checks) if specialist_checks else 0,
-        len(seen_urls),
-    )
 
     # Deterministic moderator metrics: time shares (word counts) and an
     # interruption proxy computed from the transcript beat LLM estimates.

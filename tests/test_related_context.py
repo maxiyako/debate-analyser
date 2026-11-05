@@ -75,3 +75,16 @@ def test_manager_crew_accepts_related_block() -> None:
     from src.agents import build_manager_crew
 
     assert inspect.signature(build_manager_crew).parameters["related"].default == ""
+
+
+def test_check_claims_signature_and_empty_input() -> None:
+    import inspect
+
+    from config import Settings
+    from src.agents import check_claims
+
+    params = inspect.signature(check_claims).parameters
+    assert list(params)[:3] == ["claims", "settings", "debate_date"]
+    assert params["pool"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["pool_facts"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert check_claims([], Settings(_env_file=None)) == ([], set(), [])
