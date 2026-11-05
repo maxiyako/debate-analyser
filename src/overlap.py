@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -121,3 +128,123 @@ def lead_speaker(region: Region, turns: list[Turn]) -> str:
     if active:
         return min(active)[1]
     return sorted(region.speakers)[0]
+
+
+class Embedder(Protocol):
+    def embed(self, audio: np.ndarray) -> np.ndarray: ...
+
+
+class Separator(Protocol):
+    def separate(self, audio: np.ndarray) -> list[np.ndarray]: ...
+
+
+@dataclass
+class OverlapTools:
+    separator: Separator | None
+    embedder: Embedder
+
+
+@dataclass
+class RegionResult:
+    region: Region
+    lead: str
+    streams: dict[str, np.ndarray] = field(default_factory=dict)
+    reason: str | None = None
+
+
+def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def assign_streams(sims: np.ndarray, speakers: list[str], min_sim: float) -> dict[str, int]:
+    straight = sims[0, 0] + sims[1, 1]
+    crossed = sims[0, 1] + sims[1, 0]
+    pairs = [(0, 0), (1, 1)] if straight >= crossed else [(0, 1), (1, 0)]
+    return {speakers[col]: row for row, col in pairs if sims[row, col] >= min_sim}
+
+
+def _slice(audio: np.ndarray, start: float, end: float) -> np.ndarray:
+    return audio[max(0, int(start * SR)) : min(len(audio), int(end * SR))]
+
+
+def enroll(
+    audio: np.ndarray, spans: dict[str, list[tuple[float, float]]], embedder: Embedder
+) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    for speaker, pieces in spans.items():
+        vecs = [embedder.embed(_slice(audio, s, e)) for s, e in pieces]
+        out[speaker] = np.mean(np.stack(vecs), axis=0)
+    return out
+
+
+def _peak_normalize(x: np.ndarray) -> np.ndarray:
+    peak = float(np.max(np.abs(x))) if len(x) else 0.0
+    return x if peak == 0.0 else (x * (0.9 / peak)).astype(np.float32)
+
+
+def _separate_one(
+    audio: np.ndarray,
+    region: Region,
+    enrollments: dict[str, np.ndarray],
+    settings: Settings,
+    tools: OverlapTools,
+) -> tuple[dict[str, np.ndarray], str | None]:
+    if len(region.speakers) != 2:
+        return {}, "too_many_speakers"
+    speakers = sorted(region.speakers)
+    if any(s not in enrollments for s in speakers):
+        return {}, "no_enrollment"
+    if tools.separator is None:
+        return {}, "separator_unavailable"
+
+    pad = settings.overlap_pad_seconds
+    s0 = max(0, int((region.start - pad) * SR))
+    e0 = min(len(audio), int((region.end + pad) * SR))
+    try:
+        raw = tools.separator.separate(audio[s0:e0])
+    except Exception:
+        logger.exception("Separator failed on region %.2f-%.2f", region.start, region.end)
+        return {}, "separator_error"
+
+    offset = int(region.start * SR) - s0
+    length = int(region.end * SR) - int(region.start * SR)
+    streams = [_peak_normalize(np.asarray(x[offset : offset + length], dtype=np.float32)) for x in raw[:2]]
+    vecs = [tools.embedder.embed(x) for x in streams]
+    sims = np.array([[cosine(v, enrollments[s]) for s in speakers] for v in vecs])
+    assigned = assign_streams(sims, speakers, settings.overlap_assign_min_sim)
+    if not assigned:
+        return {}, "low_similarity"
+    return {speaker: streams[idx] for speaker, idx in assigned.items()}, None
+
+
+def process_regions(
+    audio: np.ndarray,
+    regions: list[Region],
+    turns: list[Turn],
+    settings: Settings,
+    tools: OverlapTools,
+) -> list[RegionResult]:
+    if not regions:
+        return []
+    spans = select_enrollment(
+        turns, max_seconds=settings.enroll_max_seconds, min_seconds=settings.enroll_min_seconds
+    )
+    enrollments = enroll(audio, spans, tools.embedder)
+    results: list[RegionResult] = []
+    for region in regions:
+        streams, reason = _separate_one(audio, region, enrollments, settings, tools)
+        results.append(RegionResult(region, lead_speaker(region, turns), streams, reason))
+    return results
+
+
+def log_summary(results: list[RegionResult]) -> str:
+    separated = sum(1 for r in results if r.reason is None)
+    reasons = Counter(r.reason for r in results if r.reason is not None)
+    line = f"Overlap regions: {len(results)} found, {separated} separated"
+    if reasons:
+        line += ", fallback " + ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+    logger.info(line)
+    return line
