@@ -1882,6 +1882,10 @@ _MANAGER_RULES = (
     "Contested AND you found a concrete lead (a named dataset, register, or "
     "event) that one more focused round could confirm. Mention the lead in "
     "the rationale. Otherwise escalate=false.\n\n"
+    "6) CONSISTENCY — RELATED CLAIMS AND CURRENT VERDICTS, when listed, are "
+    "this debate's verdicts on other claims about the same fact. If your "
+    "verdict contradicts one of them, reconcile the two or explain the "
+    "difference in the rationale. Return no ManagerReview for them.\n\n"
     "sources: the FINAL list for the claim — only URLs that appeared in THIS "
     "run's tool output (search results or a fetch_page OK). Never write a URL "
     "from memory.\n\n"
@@ -1896,6 +1900,7 @@ def build_manager_crew(
     seen_urls: set[str],
     debate_date: "date | None" = None,
     round_no: int = 1,
+    related: str = "",
 ):
     """Phase B2: agentic fact-check manager — audits sources, hunts sub-facts.
 
@@ -1948,6 +1953,7 @@ def build_manager_crew(
             )
             + "\n\nFIRST-PASS RESULTS (verdict, sources, rationale per claim_id):\n"
             + prelim_facts_json
+            + (f"\n\n{related}" if related else "")
         ),
         expected_output=(
             "ManagerReviewList JSON: one ManagerReview per claim_id with final "

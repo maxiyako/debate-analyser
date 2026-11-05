@@ -60,3 +60,18 @@ def test_task_description_appends_related_block() -> None:
     d = _check_task_description("HEADER", [c(1)], None, related="RELATED CLAIMS (read-only): -")
     assert d.rstrip().endswith("RELATED CLAIMS (read-only): -")
     assert "RELATED CLAIMS (read-only)" not in _check_task_description("HEADER", [c(1)], None)
+
+
+def test_manager_rules_require_consistency_with_related_verdicts() -> None:
+    from src.agents import _MANAGER_RULES
+
+    assert "CONSISTENCY" in _MANAGER_RULES
+    assert "RELATED CLAIMS AND CURRENT VERDICTS" in _MANAGER_RULES
+
+
+def test_manager_crew_accepts_related_block() -> None:
+    import inspect
+
+    from src.agents import build_manager_crew
+
+    assert inspect.signature(build_manager_crew).parameters["related"].default == ""
