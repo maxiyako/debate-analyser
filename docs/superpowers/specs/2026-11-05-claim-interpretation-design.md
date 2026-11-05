@@ -124,6 +124,12 @@ extracted claim with the quote and window and list every drift. Name the
 stronger or different readings a checker might wrongly test. Say what evidence
 would refute the proposition. Never state whether the claim is true.
 
+The new `ExtractedClaim` fields appear in the extractor's output schema, so
+`run_analysis` clears them right after extraction (`clear_interpretation`);
+only the pass may fill them. Phase B and B2 move from `run_analysis` into
+`check_claims(claims, settings, debate_date, *, pool, pool_facts)`, which the
+replay reuses.
+
 ### Output model
 
 ```python
@@ -190,10 +196,12 @@ selected `ExtractedClaim` list in place:
    selected claim without a reading keeps its legacy fields and gets a note.
 2. **Number guard.** Every digit token (normalized: "30", "2021", "11,5" ->
    "11.5") in `interpretation`, `claim`, `not_asserted` and
-   `refutation_would_be` must occur in the quote, the window, `time_window`, or
-   the `resolved` text of a briefing-origin referent. A briefing-origin
-   referent's `resolved` text is itself accepted only if each of its digit
-   tokens occurs in the rendered briefing. One failing token rejects the whole
+   `refutation_would_be` must occur in the quote, the window, `time_window`,
+   the debate date, or the `resolved` text of a briefing-origin referent. A
+   briefing-origin referent's `resolved` text is itself accepted only if each
+   of its digit tokens occurs in the referent context the pass received
+   (participants, `entity_index`, glossary terms and definitions). Glossary
+   `status` is left out of that context because it states facts. One failing token rejects the whole
    reading for that claim: legacy fields are kept and a note names the token.
    Numbers written as words are not caught; the prompt rule and the fidelity
    gate cover those.
@@ -304,10 +312,13 @@ Per gold report:
    from the quote and window instead.
 3. Run the interpretation pass and `apply_readings` over all claims, so related
    claims and siblings exist.
-4. Re-check only the target claims: grounded checker plus their specialists,
-   reconcile, manager rounds, then `enforce_accusation_support` when
-   `<id>.corrections.json` exists, then the fidelity gate with the report's
-   other stored facts as siblings.
+4. Re-check only the target claims through `check_claims` (grounded checker
+   plus specialists, reconcile, manager rounds), copy each stored fact's
+   `timestamp` onto its new fact, then run the fidelity gate on the re-checked
+   facts with the report's other stored facts as siblings
+   (`audit_accusations(..., siblings=...)`). `enforce_accusation_support` is
+   skipped: stored transcripts no longer carry the edit-to-line mapping it
+   needs, and the targets' quotes, which are unchanged, already passed it.
 5. Record per case: label, stored verdict, new verdict, reading (interpretation,
    drift, `not_asserted`), and rationale.
 
