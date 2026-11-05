@@ -245,7 +245,9 @@ said in the other listed claims. Return one reading per claim:
   the proposition in the speaker's own voice. No attribution frame ("Podľa
   vyjadrenia ...", "X tvrdí, že ...") and no quotation marks; the speaker's
   hedges and uncertainty ("myslím", "pokiaľ si pamätám") belong in
-  interpretation, not in claim.
+  interpretation, not in claim. Replace "my", "sme", "naše" and similar with
+  the named actor they resolve to; never
+  leave them as pronouns, a checker cannot resolve them.
 - referents: each resolution as {text, resolved, origin}. origin is
   "transcript" when the transcript settles it, "briefing" when only the
   PARTICIPANTS AND OFFICES list does. Use that list for nothing else.
