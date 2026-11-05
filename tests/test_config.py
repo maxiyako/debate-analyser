@@ -48,3 +48,10 @@ def test_apply_credentials_exports_path(monkeypatch, tmp_path: Path) -> None:
     import os
 
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == str(key)
+
+
+def test_interpretation_off_by_default_with_window_and_chunk() -> None:
+    s = _settings()
+    assert s.interpretation_enabled is False
+    assert s.interpretation_window == 6
+    assert s.interpretation_chunk == 20

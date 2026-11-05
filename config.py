@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # the debate's other verdicts; downgrades verdicts that refute something
     # the speaker did not say. Uses judge_model.
     fidelity_enabled: bool = True
+    # Claim interpretation (Phase A2): one batched pass after selection records
+    # what each claim asserts, read from the transcript around its quote;
+    # checkers judge that reading. Uses judge_model.
+    interpretation_enabled: bool = False
+    interpretation_window: int = 6  # transcript lines before and after the quote
+    interpretation_chunk: int = 20  # claims per interpretation call
     # Fact-check manager (Phase B2): round 1 audits all checked claims;
     # further rounds re-verify only escalated (Unverified/Contested with a
     # concrete lead) claims. 0 disables the manager.
