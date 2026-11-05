@@ -188,3 +188,28 @@ def test_log_summary_counts_reasons(caplog) -> None:
         line = log_summary(results)
     assert line == "Overlap regions: 3 found, 1 separated, fallback no_enrollment=1, too_many_speakers=1"
     assert line in caplog.text
+
+
+def test_load_overlap_tools_without_separator(monkeypatch, caplog, fake_embedder) -> None:
+    import src.overlap as ov
+
+    class NoSeparator:
+        def __init__(self, device: str = "cpu") -> None:
+            raise ImportError("No module named 'clearvoice'")
+
+    monkeypatch.setattr(ov, "MossFormerSeparator", NoSeparator)
+    monkeypatch.setattr(ov, "PyannoteEmbedder", lambda token, device="cpu": fake_embedder)
+    with caplog.at_level(logging.WARNING, logger="src.overlap"):
+        tools = ov.load_overlap_tools(_settings())
+    assert tools.separator is None
+    assert tools.embedder is fake_embedder
+    assert "clearvoice" in caplog.text
+
+
+def test_load_overlap_tools_with_separator(monkeypatch, fake_embedder, fake_separator) -> None:
+    import src.overlap as ov
+
+    monkeypatch.setattr(ov, "MossFormerSeparator", lambda device="cpu": fake_separator)
+    monkeypatch.setattr(ov, "PyannoteEmbedder", lambda token, device="cpu": fake_embedder)
+    tools = ov.load_overlap_tools(_settings())
+    assert tools.separator is fake_separator

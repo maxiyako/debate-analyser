@@ -248,3 +248,64 @@ def log_summary(results: list[RegionResult]) -> str:
         line += ", fallback " + ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
     logger.info(line)
     return line
+
+
+class MossFormerSeparator:
+    REPO = "alibabasglab/MossFormer2_SS_16K"
+
+    def __init__(self, device: str = "cpu") -> None:
+        from types import SimpleNamespace
+
+        import torch
+        from clearvoice.models.mossformer2_ss.mossformer2 import MossFormer2_SS_16K
+        from huggingface_hub import hf_hub_download
+
+        args = SimpleNamespace(
+            encoder_embedding_dim=512,
+            mossformer_sequence_dim=512,
+            num_mossformer_layer=24,
+            encoder_kernel_size=16,
+            num_spks=2,
+        )
+        model = MossFormer2_SS_16K(args).model
+        path = hf_hub_download(self.REPO, "last_best_checkpoint.pt")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        missing, _unexpected = model.load_state_dict(checkpoint["model"], strict=False)
+        if missing:
+            raise RuntimeError(f"MossFormer2 checkpoint is missing {len(missing)} weights")
+        self._model = model.to(device).eval()
+        self._device = device
+        self._torch = torch
+
+    def separate(self, audio: np.ndarray) -> list[np.ndarray]:
+        torch = self._torch
+        x = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None].to(self._device)
+        with torch.inference_mode():
+            outputs = self._model(x)
+        return [o[0].detach().cpu().numpy() for o in outputs]
+
+
+class PyannoteEmbedder:
+    def __init__(self, token: str | None, device: str = "cpu") -> None:
+        import torch
+        from pyannote.audio import Inference, Model
+
+        model = Model.from_pretrained(
+            "pyannote/speaker-diarization-community-1", subfolder="embedding", token=token
+        )
+        self._inference = Inference(model, window="whole", device=torch.device(device))
+        self._torch = torch
+
+    def embed(self, audio: np.ndarray) -> np.ndarray:
+        wav = self._torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32))[None]
+        return np.asarray(self._inference({"waveform": wav, "sample_rate": SR}), dtype=np.float32)
+
+
+def load_overlap_tools(settings: Settings) -> OverlapTools:
+    embedder = PyannoteEmbedder(settings.huggingface_token)
+    try:
+        separator: Separator | None = MossFormerSeparator()
+    except Exception as exc:
+        logger.warning("Overlap separation disabled for this run: %s", exc)
+        separator = None
+    return OverlapTools(separator=separator, embedder=embedder)
