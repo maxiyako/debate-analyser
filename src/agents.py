@@ -1460,8 +1460,27 @@ def build_extract_crew(
         "extract": t_extract,
     }
 
+_READING_RULES = (
+    "READING OF THE CLAIM: a claim may carry `interpretation`, `not_asserted`, "
+    "`refutation_would_be`, `referents` and `related_claim_ids`, recorded before "
+    "any search from the transcript around the quote. Order of authority: the "
+    "`quote` is what was said; the `interpretation` is the binding reading of "
+    "the quote; `context` is only background on the debate moment. If you "
+    "believe the interpretation misreads the quote, judge the quote and say so "
+    "in the rationale. Build queries from the interpretation, the quote and "
+    "`refutation_would_be`; entities named in `referents` count as present in "
+    "the claim. Sub-facts decompose the interpretation. A `not_asserted` item "
+    "is a reading the speaker did NOT make: never test it, never mark a "
+    "sub-fact refuted or distorted because of it, and evidence against it is "
+    "unusable. False or Misleading requires evidence of the shape "
+    "`refutation_would_be` describes (same metric, period, actor and stage). "
+    "RELATED CLAIMS, when listed, are read-only context: return no verdict for "
+    "them.\n"
+)
+
 _CHECK_RULES = (
-    "When you call a search tool, build the query from the claim text, its "
+    _READING_RULES
+    + "When you call a search tool, build the query from the claim text, its "
     "verbatim quote, and its `context` field (the context tells you what the "
     "claim EXACTLY refers to — e.g. food inflation vs headline inflation). "
     "NEVER add names, people, dates or specifics that are not present in the "
@@ -1549,10 +1568,37 @@ _CHECK_EXPECTED_OUTPUT = (
 )
 
 
+def _related_block(
+    claims: list[ExtractedClaim],
+    pool: list[ExtractedClaim],
+    facts_by_id: "dict[int, VerifiedFact] | None" = None,
+) -> str:
+    """Read-only block of claims related to `claims` that are not among them."""
+    own = {c.id for c in claims}
+    by_id = {c.id: c for c in pool}
+    ids = sorted({i for c in claims for i in c.related_claim_ids if i not in own and i in by_id})
+    if not ids:
+        return ""
+    rows = []
+    for i in ids:
+        rc = by_id[i]
+        row = f"- #{i} {rc.speaker}: {rc.claim}"
+        if rc.interpretation:
+            row += f"\n  výklad: {rc.interpretation}"
+        fact = (facts_by_id or {}).get(i)
+        if fact is not None:
+            sev = f" / {fact.severity.value}" if fact.severity else ""
+            row += f"\n  aktuálny verdikt: {fact.verdict.value}{sev}. {fact.rationale[:300]}"
+        rows.append(row)
+    header = "RELATED CLAIMS AND CURRENT VERDICTS" if facts_by_id is not None else "RELATED CLAIMS"
+    return f"{header} (read-only context, return no verdict for them):\n" + "\n".join(rows)
+
+
 def _check_task_description(
     header: str,
     claims: list[ExtractedClaim],
     debate_date: "date | None" = None,
+    related: str = "",
 ) -> str:
     from datetime import date as _date
 
@@ -1568,6 +1614,7 @@ def _check_task_description(
         f"{header}\n{_CHECK_RULES}\n\n"
         "CLAIMS TO VERIFY (ExtractedClaims JSON):\n"
         f"{_claims_json(claims)}"
+        + (f"\n\n{related}" if related else "")
     )
 
 
@@ -1689,6 +1736,7 @@ def build_check_crew(
     settings: Settings,
     seen_urls: set[str],
     debate_date: "date | None" = None,
+    pool: list[ExtractedClaim] | None = None,
 ):
     """Phase B: grounded checker over all claims + one specialist per category.
 
@@ -1697,6 +1745,8 @@ def build_check_crew(
     from crewai import Agent, Crew, Process, Task
 
     from src.tools_susr import build_susr_data_tool
+
+    pool = pool or claims
 
     llm = build_llm(settings)
     grounded_tool = _build_grounded_search_tool(
@@ -1739,6 +1789,7 @@ def build_check_crew(
             "disinfo/gray-zone sites as proof.",
             claims,
             debate_date,
+            related=_related_block(claims, pool),
         ),
         expected_output=_CHECK_EXPECTED_OUTPUT,
         agent=grounded_checker,
@@ -1771,7 +1822,7 @@ def build_check_crew(
         )
         task = Task(
             description=_check_task_description(
-                spec["header"], cat_claims, debate_date
+                spec["header"], cat_claims, debate_date, related=_related_block(cat_claims, pool)
             ),
             expected_output=_CHECK_EXPECTED_OUTPUT,
             agent=agent,

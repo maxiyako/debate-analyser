@@ -1,0 +1,62 @@
+"""Checkers and the manager see the recorded reading and related claims."""
+
+from __future__ import annotations
+
+from src.agents import (
+    _CHECK_RULES,
+    ExtractedClaim,
+    Severity,
+    Verdict,
+    VerifiedFact,
+    _check_task_description,
+    _related_block,
+)
+
+
+def c(cid: int, related: list[int] | None = None, interpretation: str = "") -> ExtractedClaim:
+    return ExtractedClaim(
+        id=cid,
+        claim=f"Tvrdenie {cid}.",
+        speaker="Michal Šimečka",
+        quote="q",
+        related_claim_ids=related or [],
+        interpretation=interpretation,
+    )
+
+
+def test_check_rules_bind_the_reading() -> None:
+    for word in ("interpretation", "not_asserted", "refutation_would_be", "RELATED CLAIMS"):
+        assert word in _CHECK_RULES
+    assert "judge the quote" in _CHECK_RULES
+
+
+def test_related_block_lists_only_outside_related_claims() -> None:
+    pool = [c(1, [2, 3]), c(2, interpretation="Výnimka prešla."), c(3), c(4)]
+    block = _related_block([pool[0], pool[2]], pool)
+    assert block.startswith("RELATED CLAIMS (read-only")
+    assert "#2 Michal Šimečka: Tvrdenie 2." in block
+    assert "výklad: Výnimka prešla." in block
+    assert "#3" not in block  # claim 3 is checked in this task, not context
+    assert "#4" not in block
+    assert _related_block([pool[3]], pool) == ""
+
+
+def test_related_block_with_verdicts() -> None:
+    pool = [c(1, [2]), c(2)]
+    fact = VerifiedFact(
+        claim="Tvrdenie 2.",
+        speaker="Michal Šimečka",
+        verdict=Verdict.FALSE,
+        severity=Severity.MATERIAL,
+        rationale="x" * 400,
+    )
+    block = _related_block([pool[0]], pool, {2: fact})
+    assert block.startswith("RELATED CLAIMS AND CURRENT VERDICTS")
+    assert "aktuálny verdikt: False / material." in block
+    assert "x" * 300 in block and "x" * 301 not in block
+
+
+def test_task_description_appends_related_block() -> None:
+    d = _check_task_description("HEADER", [c(1)], None, related="RELATED CLAIMS (read-only): -")
+    assert d.rstrip().endswith("RELATED CLAIMS (read-only): -")
+    assert "RELATED CLAIMS (read-only)" not in _check_task_description("HEADER", [c(1)], None)
