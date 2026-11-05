@@ -261,3 +261,37 @@ The gold eval covers the models themselves.
    interface is where an enrollment-conditioned extractor would be tried next.
 
 Old episodes keep their transcripts and reports.
+
+## Decisions made while planning
+
+- ClearerVoice is installed with `--no-deps` (`clearvoice==0.1.2`,
+  `yamlargparse==1.31.1`, `rotary-embedding-torch==0.8.3`,
+  `torchinfo==1.8.0`). A normal install would upgrade torch 2.13 to 2.15 and
+  pin numpy 1.26.4 and soundfile 0.12.1. Only the MossFormer2 model class is
+  imported; the `ClearVoice` wrapper (and its OpenCV, librosa and video
+  dependencies) is not used. Weights come from
+  `alibabasglab/MossFormer2_SS_16K/last_best_checkpoint.pt`, loaded with
+  `weights_only=True`.
+- Regions longer than 8 s are split into equal chunks sharing one group,
+  because the model handles about 10 s per pass. Each chunk is assigned on its
+  own, which keeps stream order from swapping between chunks.
+- Overlap spans merge only when the same speakers are active, so a short
+  three-speaker moment inside a two-speaker crossing falls back alone.
+- Enrollment uses clean pieces of turns (turn time minus every overlap, even
+  overlaps shorter than `overlap_min_seconds`) rather than only whole turns
+  without overlap.
+- Separation and embedding run on CPU; Whisper keeps `whisper_device`.
+- The v2 cache is ignored when its `model` differs from
+  `diarization_model_id`, and an empty diarization is not cached.
+- `crosstalk_min_overlap` is removed: speakers now come from the slice or
+  stream that produced the text, so no overlap fraction is computed.
+
+## Smoke check of the real models
+
+Two real speakers' clean 4 s turns from episode 604147 (not used for
+enrollment) were summed and separated on CPU. The streams matched the right
+speakers (similarity 0.77 and 0.47, both above `overlap_assign_min_sim`), and
+the assignment put the two speakers on different streams. Separating the 4 s
+mix took 8.4 s on the first call. One speaker's own clean audio scored only
+0.38 against their enrollment, so the 0.3 threshold has little margin; the gold
+run is where it gets tuned.
