@@ -207,3 +207,73 @@ def test_window_limits_segments(voice_audio, fake_separator, fake_embedder, fake
         ("B", 4.0, 6.0, True),
         ("A", 6.0, 7.0, False),
     ]
+
+
+# --- run_transcription wiring --------------------------------------------------
+
+import src.transcription as tr
+
+
+def _wire(monkeypatch, tmp_path, fake_asr, *, diar, flag=False, tools=None):
+    calls = {"diarize": 0, "tools": 0}
+
+    def fake_diarize(audio_path, settings):
+        calls["diarize"] += 1
+        return diar
+
+    def fake_tools(settings):
+        calls["tools"] += 1
+        return tools
+
+    monkeypatch.setattr(tr, "diarize", fake_diarize)
+    monkeypatch.setattr(tr, "load_audio", lambda p: np.zeros(20 * SR, dtype=np.float32))
+    monkeypatch.setattr(
+        tr, "WhisperASR", lambda settings: SimpleNamespace(transcribe=fake_asr.transcribe, close=lambda: None)
+    )
+    monkeypatch.setattr(tr, "load_overlap_tools", fake_tools)
+    monkeypatch.setattr(tr, "upload_file", lambda *a, **k: None)
+    settings = _settings(
+        transcript_dir=tmp_path, overlap_separation_enabled=flag, diarization_model_id="m"
+    )
+    return settings, calls
+
+
+def test_run_transcription_writes_v2_cache_and_transcript(monkeypatch, tmp_path, fake_asr) -> None:
+    diar = tr.Diarization("m", [(0.0, 10.0, "S0")], [(0.0, 10.0, "S0")])
+    settings, calls = _wire(monkeypatch, tmp_path, fake_asr, diar=diar)
+    (tmp_path / "ep.diarization.json").write_text("[]", encoding="utf-8")
+    out = tr.run_transcription(tmp_path / "ep.wav", "ep", settings=settings)
+    assert out.read_text(encoding="utf-8") == "Speaker A [00:00]: c0\n"
+    assert tr.load_diarization(tmp_path / "ep.diarization.v2.json") == diar
+    assert (tmp_path / "ep.diarization.json").read_text(encoding="utf-8") == "[]"
+    assert calls == {"diarize": 1, "tools": 0}
+
+
+def test_run_transcription_reuses_matching_cache(monkeypatch, tmp_path, fake_asr) -> None:
+    diar = tr.Diarization("m", [(0.0, 10.0, "S0")], [(0.0, 10.0, "S0")])
+    settings, calls = _wire(monkeypatch, tmp_path, fake_asr, diar=diar)
+    tr.save_diarization(tmp_path / "ep.diarization.v2.json", diar)
+    tr.run_transcription(tmp_path / "ep.wav", "ep", settings=settings)
+    assert calls["diarize"] == 0
+
+
+def test_run_transcription_rediarizes_on_model_change(monkeypatch, tmp_path, fake_asr) -> None:
+    diar = tr.Diarization("m", [(0.0, 10.0, "S0")], [(0.0, 10.0, "S0")])
+    settings, calls = _wire(monkeypatch, tmp_path, fake_asr, diar=diar)
+    tr.save_diarization(tmp_path / "ep.diarization.v2.json", tr.Diarization("old", [], []))
+    tr.run_transcription(tmp_path / "ep.wav", "ep", settings=settings)
+    assert calls["diarize"] == 1
+
+
+def test_run_transcription_does_not_cache_empty_diarization(monkeypatch, tmp_path, fake_asr) -> None:
+    settings, _ = _wire(monkeypatch, tmp_path, fake_asr, diar=tr.Diarization("m", [], []))
+    tr.run_transcription(tmp_path / "ep.wav", "ep", settings=settings)
+    assert not (tmp_path / "ep.diarization.v2.json").exists()
+
+
+def test_run_transcription_loads_tools_only_with_flag(monkeypatch, tmp_path, fake_asr, fake_embedder) -> None:
+    diar = tr.Diarization("m", [(0.0, 10.0, "S0")], [(0.0, 10.0, "S0")])
+    tools = OverlapTools(separator=None, embedder=fake_embedder)
+    settings, calls = _wire(monkeypatch, tmp_path, fake_asr, diar=diar, flag=True, tools=tools)
+    tr.run_transcription(tmp_path / "ep.wav", "ep", settings=settings)
+    assert calls["tools"] == 1

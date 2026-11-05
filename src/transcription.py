@@ -18,6 +18,7 @@ from src.overlap import (
     Region,
     Turn,
     find_overlap_regions,
+    load_overlap_tools,
     log_summary,
     process_regions,
     trim_spans,
@@ -360,25 +361,33 @@ def format_transcript(segments: list[Segment]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def load_or_diarize(audio_path: Path, episode_id: str, settings: Settings) -> Diarization:
+    cache = diarization_cache_path(settings.transcript_dir, episode_id)
+    diar = load_diarization(cache)
+    if diar is not None and diar.model == settings.diarization_model_id:
+        logger.info("Loaded cached diarization (%d turns) from %s", len(diar.turns), cache)
+        return diar
+    diar = diarize(audio_path, settings)
+    if diar.turns:
+        save_diarization(cache, diar)
+        logger.info("Cached diarization -> %s", cache)
+    return diar
+
+
 def run_transcription(audio_path: Path, episode_id: str, settings: Settings | None = None) -> Path:
     """Diarize + ASR + merge; write transcript file and return its path."""
     settings = settings or get_settings()
     settings.ensure_dirs()
 
-    diar_cache = settings.transcript_dir / f"{episode_id}.diarization.json"
-    if diar_cache.exists():
-        raw = json.loads(diar_cache.read_text(encoding="utf-8"))
-        diar_turns = [(float(a), float(b), str(s)) for a, b, s in raw]
-        logger.info("Loaded cached diarization (%d turns) from %s", len(diar_turns), diar_cache)
-    else:
-        diar_turns = diarize(audio_path, settings).exclusive_turns
-        diar_cache.write_text(json.dumps(diar_turns), encoding="utf-8")
-        logger.info("Cached diarization -> %s", diar_cache)
+    diar = load_or_diarize(audio_path, episode_id, settings)
+    tools = None
+    if settings.overlap_separation_enabled and diar.turns:
+        tools = load_overlap_tools(settings)
 
-    diar = Diarization(settings.diarization_model_id, diar_turns, diar_turns)
+    audio = load_audio(audio_path)
     asr = WhisperASR(settings)
     try:
-        raw = build_segments(load_audio(audio_path), diar, settings, asr)
+        raw = build_segments(audio, diar, settings, asr, tools=tools)
     finally:
         asr.close()
     merged = merge_segments(raw)
