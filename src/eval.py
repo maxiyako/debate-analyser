@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Callable
 
 import click
+from pydantic import BaseModel
 
-from src.agents import VerifiedFact
+from src.agents import ClaimCategory, ExtractedClaim, Verdict, VerifiedFact
 from src.fidelity import FidelityOutput, audit_accusations
 from src.judge import JudgeOutput, judge_facts
 from src.tools.page import PageResult, fetch_page, parse_iso_date
@@ -134,6 +135,198 @@ def fidelity_eval(
     return {"summary": summary, "cases": cases, "stale": stale, "notes": notes}
 
 
+_ACCUSATIONS = (Verdict.FALSE, Verdict.MISLEADING)
+
+
+class CategoryAssignment(BaseModel):
+    claim_id: int
+    category: ClaimCategory
+
+
+class CategoryList(BaseModel):
+    items: list[CategoryAssignment] = []
+
+
+Recheck = Callable[
+    [list[ExtractedClaim], list[ExtractedClaim], dict[int, VerifiedFact], date | None],
+    list[VerifiedFact],
+]
+
+
+def rebuild_claims(facts: list[VerifiedFact]) -> list[ExtractedClaim]:
+    """Stored facts as claims (id = index + 1); time fields are not stored and stay empty."""
+    return [
+        ExtractedClaim(
+            id=i + 1,
+            claim=f.claim,
+            speaker=f.speaker,
+            quote=f.quote,
+            salience=f.salience,
+            consequence=f.salience,
+            category=f.category or ClaimCategory.CURRENT_EVENTS,
+        )
+        for i, f in enumerate(facts)
+    ]
+
+
+def assign_categories(
+    claims: list[ExtractedClaim],
+    facts: list[VerifiedFact],
+    llm: Callable[[str], CategoryList],
+) -> None:
+    """Classify claims whose stored fact has no category, for specialist routing."""
+    missing = [c for c, f in zip(claims, facts) if f.category is None]
+    if not missing:
+        return
+    prompt = (
+        "Assign each claim one category for specialist fact-checker routing:\n"
+        "- economy_finance: budget, deficit, debt, consolidation, taxes, salaries of "
+        "officials, public spending.\n"
+        "- statistics: official statistical indicators (inflation/CPI, wages, "
+        "unemployment, GDP, demographics).\n"
+        "- history_politics: parliamentary votes, laws, past governments, past "
+        "statements or positions.\n"
+        "- current_events: recent events, quote attributions, media affairs.\n\n"
+        + "\n".join(f"{c.id}. {c.claim}" for c in missing)
+    )
+    by_id = {c.id: c for c in missing}
+    for item in llm(prompt).items:
+        if item.claim_id in by_id:
+            by_id[item.claim_id].category = item.category
+
+
+def replay_report(
+    report: str,
+    cases: list[dict],
+    reports_dir: Path,
+    transcripts_dir: Path,
+    dates: dict[str, str],
+    *,
+    interpret_llm,
+    category_llm,
+    recheck: Recheck | None,
+    gate_llm,
+    no_check: bool = False,
+    window: int = 6,
+    chunk: int = 20,
+    run: int = 1,
+) -> dict:
+    """Re-interpret one stored report and re-check its gold cases."""
+    from src.briefing import DebateBriefing
+    from src.interpretation import interpret_claims
+    from src.transcript_lines import parse_lines
+
+    payload = json.loads((reports_dir / f"{report}.json").read_text(encoding="utf-8"))
+    facts = [VerifiedFact.model_validate(f) for f in payload.get("facts", [])]
+    debate = parse_iso_date(payload.get("debate_date") or dates.get(base_id(report) or "", ""))
+    briefing = (
+        DebateBriefing.model_validate(payload["briefing"]) if payload.get("briefing") else None
+    )
+    tpath = transcripts_dir / f"{report}.corrected.txt"
+    lines = parse_lines(tpath.read_text(encoding="utf-8")) if tpath.exists() else []
+
+    valid: list[dict] = []
+    stale: list[str] = []
+    for case in cases:
+        i = case["index"]
+        if not (0 <= i < len(facts)) or not facts[i].claim.startswith(case["claim_prefix"]):
+            stale.append(f"{report}#{i}")
+        else:
+            valid.append(case)
+
+    claims = rebuild_claims(facts)
+    notes = interpret_claims(
+        claims, lines, llm=interpret_llm, briefing=briefing, debate_date=debate,
+        window=window, chunk=chunk,
+    )
+    after: dict[int, VerifiedFact] = {}
+    if valid and not no_check:
+        assert recheck is not None
+        assign_categories(claims, facts, category_llm)
+        targets = [claims[c["index"]] for c in valid]
+        pool_facts = {i + 1: f for i, f in enumerate(facts)}
+        new_facts = recheck(targets, claims, pool_facts, debate)
+        for case, nf in zip(valid, new_facts):
+            nf.timestamp = facts[case["index"]].timestamp
+            after[case["index"]] = nf
+        siblings = [after.get(i, f) for i, f in enumerate(facts)]
+        notes.extend(audit_accusations(list(after.values()), lines, llm=gate_llm, siblings=siblings))
+
+    rows = []
+    for case in valid:
+        i = case["index"]
+        c, nf = claims[i], after.get(i)
+        rows.append(
+            {
+                **case,
+                "run": run,
+                "claim_after": c.claim,
+                "interpretation": c.interpretation,
+                "not_asserted": c.not_asserted,
+                "refutation_would_be": c.refutation_would_be,
+                "before": facts[i].verdict.value,
+                "after": nf.verdict.value if nf else None,
+                "rationale": nf.rationale if nf else "",
+            }
+        )
+    return {"cases": rows, "stale": stale, "notes": notes}
+
+
+def interpret_replay(
+    gold: list[dict],
+    reports_dir: Path,
+    transcripts_dir: Path,
+    dates: dict[str, str],
+    *,
+    interpret_llm,
+    category_llm,
+    recheck: Recheck | None,
+    gate_llm,
+    labels: set[str],
+    only: set[str] | None = None,
+    runs: int = 1,
+    no_check: bool = False,
+    window: int = 6,
+    chunk: int = 20,
+) -> dict:
+    """Re-interpret and re-check gold cases; count which stay accusations per label."""
+    picked = [
+        c
+        for c in gold
+        if c["label"] in labels and (not only or f"{c['report']}#{c['index']}" in only)
+    ]
+    by_report: dict[str, list[dict]] = {}
+    for case in picked:
+        by_report.setdefault(case["report"], []).append(case)
+
+    cases: list[dict] = []
+    stale: list[str] = []
+    notes: list[str] = []
+    for run in range(1, runs + 1):
+        for report, report_cases in by_report.items():
+            r = replay_report(
+                report, report_cases, reports_dir, transcripts_dir, dates,
+                interpret_llm=interpret_llm, category_llm=category_llm, recheck=recheck,
+                gate_llm=gate_llm, no_check=no_check, window=window, chunk=chunk, run=run,
+            )
+            cases.extend(r["cases"])
+            notes.extend(f"[run {run}] {report}: {n}" for n in r["notes"])
+            if run == 1:
+                stale.extend(r["stale"])
+
+    accusations = {v.value for v in _ACCUSATIONS}
+    summary = {
+        label: {
+            "n": sum(1 for c in cases if c["label"] == label),
+            "accusation": sum(
+                1 for c in cases if c["label"] == label and c["after"] in accusations
+            ),
+        }
+        for label in sorted(labels)
+    }
+    return {"summary": summary, "cases": cases, "stale": stale, "notes": notes}
+
+
 @click.group()
 def cli() -> None:
     """Evaluation tools."""
@@ -195,6 +388,81 @@ def fidelity(gold_path: Path, reports_dir: Path, transcripts_dir: Path, out_path
     if result["stale"]:
         click.echo("Stale gold cases (report changed): " + ", ".join(result["stale"]))
     click.echo(TRACKER.summary(settings.judge_model or settings.gemini_model))
+    click.echo(f"Written: {out_path}")
+
+
+@cli.command("interpret-replay")
+@click.option("--gold", "gold_path", type=click.Path(path_type=Path, exists=True), default=Path("data/eval/fidelity_gold.json"))
+@click.option("--reports", "reports_dir", type=click.Path(path_type=Path, exists=True), default=Path("data/reports"))
+@click.option("--transcripts", "transcripts_dir", type=click.Path(path_type=Path, exists=True), default=Path("data/transcripts"))
+@click.option("--dates", "dates_path", type=click.Path(path_type=Path), default=Path("data/debate_dates.json"))
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=Path("data/eval/interpret_replay.json"))
+@click.option("--labels", default="downgrade,keep", help="Comma-separated gold labels to replay.")
+@click.option("--only", multiple=True, help="Gold case(s) as REPORT#INDEX; default all with --labels.")
+@click.option("--runs", default=1, type=int, help="Repeat the replay to expose variance.")
+@click.option("--no-check", is_flag=True, help="Only re-interpret; print readings, no re-check.")
+def interpret_replay_cmd(
+    gold_path: Path,
+    reports_dir: Path,
+    transcripts_dir: Path,
+    dates_path: Path,
+    out_path: Path,
+    labels: str,
+    only: tuple[str, ...],
+    runs: int,
+    no_check: bool,
+) -> None:
+    """Re-interpret and re-check gold accusations without a full pipeline run."""
+    from config import get_settings
+    from src.agents import check_claims
+    from src.costs import TRACKER
+    from src.fidelity import default_fidelity_llm
+    from src.interpretation import default_interpretation_llm
+    from src.llm import generate_json
+
+    settings = get_settings()
+    TRACKER.reset()
+    model = settings.judge_model or settings.gemini_model
+
+    def category_llm(prompt: str) -> CategoryList:
+        return generate_json(prompt, CategoryList, settings, label="replay_category", model=model)
+
+    def recheck(targets, pool, pool_facts, debate):
+        facts, _urls, _notes = check_claims(targets, settings, debate, pool=pool, pool_facts=pool_facts)
+        return facts
+
+    gold = json.loads(gold_path.read_text(encoding="utf-8"))
+    result = interpret_replay(
+        gold,
+        reports_dir,
+        transcripts_dir,
+        load_dates(dates_path),
+        interpret_llm=default_interpretation_llm(settings),
+        category_llm=category_llm,
+        recheck=recheck,
+        gate_llm=default_fidelity_llm(settings),
+        labels={s.strip() for s in labels.split(",") if s.strip()},
+        only=set(only) or None,
+        runs=runs,
+        no_check=no_check,
+        window=settings.interpretation_window,
+        chunk=settings.interpretation_chunk,
+    )
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    for c in result["cases"]:
+        click.echo(
+            f"[run {c['run']}] {c['report']}#{c['index']} {c['label']:<9} "
+            f"{c['before']} -> {c['after'] or '-'}\n"
+            f"    claim: {c['claim_after']}\n"
+            f"    reading: {c['interpretation'] or '(none)'}\n"
+            f"    not asserted: {'; '.join(c['not_asserted']) or '(none)'}"
+        )
+    for label, s in result["summary"].items():
+        click.echo(f"{label:<10} n={s['n']:>3} still_accusation={s['accusation']:>3}")
+    if result["stale"]:
+        click.echo("Stale gold cases (report changed): " + ", ".join(result["stale"]))
+    click.echo(TRACKER.summary(model))
     click.echo(f"Written: {out_path}")
 
 
