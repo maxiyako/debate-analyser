@@ -381,6 +381,10 @@ def _build_fact(
         sources=sources,
         salience=max(1, min(5, int(claim.salience or 3))),
         rationale=rationale,
+        interpretation=claim.interpretation,
+        not_asserted=list(claim.not_asserted),
+        claim_extracted=claim.claim_extracted,
+        category=claim.category,
     )
 
 

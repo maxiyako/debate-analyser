@@ -182,6 +182,15 @@ class ModeratorAudit(BaseModel):
     summary: str = ""
 
 
+class ClaimCategory(str, Enum):
+    """Routing category for specialist fact-checkers."""
+
+    ECONOMY_FINANCE = "economy_finance"
+    STATISTICS = "statistics"
+    HISTORY_POLITICS = "history_politics"
+    CURRENT_EVENTS = "current_events"
+
+
 class VerifiedFact(BaseModel):
     claim: str
     speaker: str
@@ -228,6 +237,19 @@ class VerifiedFact(BaseModel):
         default_factory=list,
         description="Ids of applied transcript edits on the quoted line(s).",
     )
+    interpretation: str = Field(
+        default="",
+        description="What the speaker asserted, as recorded before checking (set in code).",
+    )
+    not_asserted: list[str] = Field(
+        default_factory=list,
+        description="Readings the speaker did not make (set in code).",
+    )
+    claim_extracted: str = Field(
+        default="",
+        description="Original extracted claim text when the interpretation rewrote it (set in code).",
+    )
+    category: ClaimCategory | None = None
 
 
 class AnalysisReport(BaseModel):
@@ -288,15 +310,6 @@ class ClaimUsage(str, Enum):
     OTHER = "other"
 
 
-class ClaimCategory(str, Enum):
-    """Routing category for specialist fact-checkers."""
-
-    ECONOMY_FINANCE = "economy_finance"
-    STATISTICS = "statistics"
-    HISTORY_POLITICS = "history_politics"
-    CURRENT_EVENTS = "current_events"
-
-
 class Checkability(str, Enum):
     """Only empirical claims enter fact-checking and scoring."""
 
@@ -304,6 +317,17 @@ class Checkability(str, Enum):
     OPINION = "opinion"  # value judgement, evaluation, rhetoric
     PREDICTION = "prediction"  # about the future
     DEFINITIONAL = "definitional"  # about meaning of a term, translation, semantics
+
+
+class ReferentOrigin(str, Enum):
+    TRANSCRIPT = "transcript"
+    BRIEFING = "briefing"
+
+
+class Referent(BaseModel):
+    text: str = Field(description='The words as spoken, e.g. "my".')
+    resolved: str = Field(description="Who or what they refer to, in Slovak.")
+    origin: ReferentOrigin
 
 
 class ExtractedClaim(BaseModel):
@@ -387,6 +411,30 @@ class ExtractedClaim(BaseModel):
             "DEBATE DATE (e.g. debate 2026-06-14 + 'pred dvomi mesiacmi' -> "
             "'~2026-04'; 'v roku 2014' -> '2014'). Empty if no time reference."
         ),
+    )
+    claim_extracted: str = Field(
+        default="",
+        description="Set in code by the interpretation pass; leave empty.",
+    )
+    interpretation: str = Field(
+        default="",
+        description="Set in code by the interpretation pass; leave empty.",
+    )
+    not_asserted: list[str] = Field(
+        default_factory=list,
+        description="Set in code by the interpretation pass; leave empty.",
+    )
+    refutation_would_be: str = Field(
+        default="",
+        description="Set in code by the interpretation pass; leave empty.",
+    )
+    referents: list[Referent] = Field(
+        default_factory=list,
+        description="Set in code by the interpretation pass; leave empty.",
+    )
+    related_claim_ids: list[int] = Field(
+        default_factory=list,
+        description="Set in code by the interpretation pass; leave empty.",
     )
 
 
