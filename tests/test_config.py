@@ -55,3 +55,14 @@ def test_interpretation_off_by_default_with_window_and_chunk() -> None:
     assert s.interpretation_enabled is False
     assert s.interpretation_window == 6
     assert s.interpretation_chunk == 20
+
+
+def test_overlap_settings_defaults() -> None:
+    s = _settings()
+    assert s.diarization_model_id == "pyannote/speaker-diarization-community-1"
+    assert s.overlap_separation_enabled is False
+    assert s.overlap_min_seconds == 0.5
+    assert s.overlap_pad_seconds == 0.25
+    assert s.overlap_assign_min_sim == 0.3
+    assert s.enroll_max_seconds == 30.0
+    assert s.enroll_min_seconds == 3.0

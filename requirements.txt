@@ -35,3 +35,8 @@ trafilatura>=1.12
 
 # Testing
 pytest>=8.0
+
+# Overlap separation (optional, used only with OVERLAP_SEPARATION_ENABLED=true).
+# clearvoice pins torch/numpy/soundfile/librosa versions we must not change, so
+# install it and the three packages its separation model imports with --no-deps:
+#   pip install --no-deps clearvoice==0.1.2 yamlargparse==1.31.1 rotary-embedding-torch==0.8.3 torchinfo==1.8.0

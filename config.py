@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     # Local ML
     whisper_device: str = "cpu"
     whisper_model_id: str = "kinit/whisper-large-v3-sk"
-    diarization_model_id: str = "pyannote/speaker-diarization-3.1"
+    diarization_model_id: str = "pyannote/speaker-diarization-community-1"
 
     # ASR windowing (overlapping windows + fine segment timestamps for accurate
     # speaker alignment; overlap is deduped from each window's trusted centre).
@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     # Flag a line as cross-talk when a second speaker overlaps at least this
     # fraction of the segment's duration.
     crosstalk_min_overlap: float = 0.35
+    # Overlap separation: two-speaker regions are split into one stream per
+    # speaker and transcribed separately. Off until the overlap gold gate passes.
+    overlap_separation_enabled: bool = False
+    overlap_min_seconds: float = 0.5
+    overlap_pad_seconds: float = 0.25
+    overlap_assign_min_sim: float = 0.3
+    enroll_max_seconds: float = 30.0
+    enroll_min_seconds: float = 3.0
 
     # Paths
     raw_dir: Path = Field(default_factory=lambda: DATA_DIR / "raw")
